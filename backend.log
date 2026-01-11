@@ -1,0 +1,435 @@
+    Updating crates.io index
+     Locking 628 packages to latest compatible versions
+      Adding axum v0.7.9 (available: v0.8.8)
+      Adding bincode v1.3.3 (available: v3.0.0)
+      Adding dashmap v5.5.3 (available: v6.1.0)
+      Adding generic-array v0.14.7 (available: v0.14.9)
+      Adding nvml-wrapper v0.10.0 (available: v0.11.0)
+      Adding prometheus v0.13.4 (available: v0.14.0)
+      Adding r2d2_sqlite v0.25.0 (available: v0.32.0)
+      Adding rand v0.8.5 (available: v0.9.2)
+      Adding reqwest v0.11.27 (available: v0.13.1)
+      Adding rusqlite v0.32.1 (available: v0.38.0)
+      Adding sysinfo v0.30.13 (available: v0.37.2)
+      Adding toml v0.8.2 (available: v0.8.23)
+      Adding toml_datetime v0.6.3 (available: v0.6.11)
+      Adding toml_edit v0.20.2 (available: v0.20.7)
+      Adding tower v0.4.13 (available: v0.5.2)
+      Adding tower-http v0.5.2 (available: v0.6.8)
+      Adding validator v0.16.1 (available: v0.20.0)
+      Adding webkit2gtk v2.0.1 (available: v2.0.2)
+      Adding webkit2gtk-sys v2.0.1 (available: v2.0.2)
+      Adding which v1.0.5 (available: v8.0.0)
+      Adding zip v1.1.4 (available: v7.0.0)
+warning: unused import: `crate::memory_db::StoredMessage`
+  --> crates\offline-intelligence\src\api\search_api.rs:16:5
+   |
+16 | use crate::memory_db::StoredMessage;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::resources::ResourceManager`
+ --> crates\offline-intelligence\src\config.rs:9:5
+  |
+9 | use crate::resources::ResourceManager;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `warn`
+ --> crates\offline-intelligence\src\context_engine\tier_manager.rs:8:28
+  |
+8 | use tracing::{debug, info, warn};
+  |                            ^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> crates\offline-intelligence\src\context_engine\context_builder.rs:6:5
+  |
+6 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `error`
+  --> crates\offline-intelligence\src\context_engine\orchestrator.rs:13:28
+   |
+13 | use tracing::{info, debug, error, warn};
+   |                            ^^^^^
+
+warning: unused import: `warn`
+ --> crates\offline-intelligence\src\memory_db\summary_store.rs:7:28
+  |
+7 | use tracing::{debug, info, warn};
+  |                            ^^^^
+
+warning: unused import: `debug`
+ --> crates\offline-intelligence\src\memory_db\embedding_store.rs:8:15
+  |
+8 | use tracing::{debug, info, warn};
+  |               ^^^^^
+
+warning: unused imports: `HeaderValue` and `IntoResponse`
+ --> crates\offline-intelligence\src\proxy.rs:6:24
+  |
+6 |     http::{StatusCode, HeaderValue},
+  |                        ^^^^^^^^^^^
+7 |     response::{IntoResponse, Response},
+  |                ^^^^^^^^^^^^
+
+warning: unused import: `json`
+  --> crates\offline-intelligence\src\proxy.rs:10:18
+   |
+10 | use serde_json::{json, Value};
+   |                  ^^^^
+
+warning: unused import: `std::io::Write`
+ --> crates\offline-intelligence\src\resources.rs:7:5
+  |
+7 | use std::io::Write;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::memory::Message`
+ --> crates\offline-intelligence\src\cache_management\cache_bridge.rs:3:5
+  |
+3 | use crate::memory::Message;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::utils::topic_extractor::TopicExtractor`
+ --> crates\offline-intelligence\src\cache_management\cache_bridge.rs:4:5
+  |
+4 | use crate::utils::topic_extractor::TopicExtractor; // You'll need to ensure this exists
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `StoredMessage`
+ --> crates\offline-intelligence\src\cache_management\cache_manager.rs:4:40
+  |
+4 | use crate::memory_db::{MemoryDatabase, StoredMessage};
+  |                                        ^^^^^^^^^^^^^
+
+warning: unused import: `RetrievalStrategy`
+ --> crates\offline-intelligence\src\cache_management\cache_manager.rs:5:60
+  |
+5 | use crate::cache_management::cache_config::{KVCacheConfig, RetrievalStrategy, SnapshotStrategy};
+  |                                                            ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TransitionType`
+ --> crates\offline-intelligence\src\cache_management\cache_manager.rs:8:65
+  |
+8 | use crate::cache_management::cache_bridge::{CacheContextBridge, TransitionType};
+  |                                                                 ^^^^^^^^^^^^^^
+
+warning: unused imports: `error` and `warn`
+  --> crates\offline-intelligence\src\cache_management\cache_manager.rs:12:21
+   |
+12 | use tracing::{info, warn, debug, error};
+   |                     ^^^^         ^^^^^
+
+warning: unused import: `Deserialize`
+  --> crates\offline-intelligence\src\cache_management\cache_manager.rs:14:24
+   |
+14 | use serde::{Serialize, Deserialize};
+   |                        ^^^^^^^^^^^
+
+warning: unused import: `tracing::debug`
+ --> crates\offline-intelligence\src\cache_management\cache_scorer.rs:5:5
+  |
+5 | use tracing::debug;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `regex::Regex`
+ --> crates\offline-intelligence\src\utils\topic_extractor.rs:4:5
+  |
+4 | use regex::Regex;
+  |     ^^^^^^^^^^^^
+
+warning: unused import: `tower::ServiceBuilder`
+  --> crates\offline-intelligence\src\lib.rs:37:5
+   |
+37 | use tower::ServiceBuilder;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: private item shadows public glob re-export
+  --> crates\offline-intelligence\src\lib.rs:47:5
+   |
+47 | use cache_management::KVCacheManager;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: the name `KVCacheManager` in the type namespace is supposed to be publicly re-exported here
+  --> crates\offline-intelligence\src\lib.rs:24:9
+   |
+24 | pub use cache_management::*;
+   |         ^^^^^^^^^^^^^^^^^^^
+note: but the private item here shadows it
+  --> crates\offline-intelligence\src\lib.rs:47:5
+   |
+47 | use cache_management::KVCacheManager;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(hidden_glob_reexports)]` on by default
+
+warning: variable does not need to be mutable
+  --> crates\offline-intelligence\src\context_engine\orchestrator.rs:97:17
+   |
+97 |             let mut tier_manager = self.tier_manager.write().await;
+   |                 ----^^^^^^^^^^^^
+   |                 |
+   |                 help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\offline-intelligence\src\memory_db\mod.rs:177:13
+    |
+177 |         let mut tx = conn.transaction()?;
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused import: `CacheEntryScorer`
+ --> crates\offline-intelligence\src\cache_management\cache_manager.rs:6:94
+  |
+6 | use crate::cache_management::cache_extractor::{CacheExtractor, ExtractedCacheEntry, KVEntry, CacheEntryScorer as...
+  |                                                                                              ^^^^^^^^^^^^^^^^
+
+warning: unused variable: `idx`
+   --> crates\offline-intelligence\src\memory_db\conversation_store.rs:105:18
+    |
+105 |             for (idx, (role, content, message_index, tokens, importance_score)) in messages.iter().enumerate() {
+    |                  ^^^ help: if this is intentional, prefix it with an underscore: `_idx`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `original_context` is never read
+  --> crates\offline-intelligence\src\proxy.rs:62:5
+   |
+58 | struct ConversationCapturer<S> {
+   |        -------------------- field in this struct
+...
+62 |     original_context: Vec<Message>,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `is_oom` is never used
+   --> crates\offline-intelligence\src\runner.rs:189:4
+    |
+189 | fn is_oom(err: &anyhow::Error) -> bool {
+    |    ^^^^^^
+
+warning: function `is_port_conflict` is never used
+   --> crates\offline-intelligence\src\runner.rs:195:4
+    |
+195 | fn is_port_conflict(err: &anyhow::Error) -> bool {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: field `max_history` is never read
+  --> crates\offline-intelligence\src\cache_management\cache_bridge.rs:10:5
+   |
+ 8 | pub struct CacheContextBridge {
+   |            ------------------ field in this struct
+ 9 |     cache_history: Vec<CacheTransition>,
+10 |     max_history: usize,
+   |     ^^^^^^^^^^^
+
+warning: unused `Result` that must be used
+  --> crates\offline-intelligence\src\memory_db\embedding_store.rs:79:13
+   |
+79 |             index.add(&embedding, message_id);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this `Result` may be an `Err` variant, which should be handled
+   = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+   |
+79 |             let _ = index.add(&embedding, message_id);
+   |             +++++++
+
+warning: unused `Result` that must be used
+   --> crates\offline-intelligence\src\memory_db\embedding_store.rs:104:13
+    |
+104 |             index.add(&embedding.embedding, embedding.message_id);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+104 |             let _ = index.add(&embedding.embedding, embedding.message_id);
+    |             +++++++
+
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+   --> crates\offline-intelligence\src\cache_management\cache_manager.rs:203:13
+    |
+203 |             drop(session_state);
+    |             ^^^^^-------------^
+    |                  |
+    |                  argument has type `&mut SessionCacheState`
+    |
+    = note: `#[warn(dropping_references)]` on by default
+help: use `let _ = ...` to ignore the expression or result
+    |
+203 -             drop(session_state);
+203 +             let _ = session_state;
+    |
+
+warning: `offline-intelligence` (lib) generated 32 warnings (run `cargo fix --lib -p offline-intelligence` to apply 23 suggestions)
+    Finished `release` profile [optimized] target(s) in 4.74s
+     Running `target\release\offline-intelligence.exe`
+[2m2026-01-11T07:03:39.4209083Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m Current Configuration:
+[2m2026-01-11T07:03:39.4209608Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - Model Path: E:/_Aud.io/crates/offline-intelligence/Resources/models/gguf-model.gguf
+[2m2026-01-11T07:03:39.4209681Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - Llama Binary: E:/_Aud.io/crates/offline-intelligence/Resources/bin/Windows/llama-b6970-bin-win-cuda-12.4-x64/llama-server.exe
+[2m2026-01-11T07:03:39.420975Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - Context Size: 32768
+[2m2026-01-11T07:03:39.4209799Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - Batch Size: 128
+[2m2026-01-11T07:03:39.4209848Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - Threads: 6
+[2m2026-01-11T07:03:39.4209895Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - GPU Layers: 16
+[2m2026-01-11T07:03:39.4209942Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - Max Streams: 2
+[2m2026-01-11T07:03:39.4209986Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - API: 127.0.0.1:8000
+[2m2026-01-11T07:03:39.4210031Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - Backend: 127.0.0.1:8001
+[2m2026-01-11T07:03:39.4210079Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - Queue Size: 100
+[2m2026-01-11T07:03:39.4210122Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - Queue Timeout: 30s
+[2m2026-01-11T07:03:39.4210167Z[0m [32m INFO[0m [2moffline_intelligence::config[0m[2m:[0m - Backend URL: http://127.0.0.1:8001
+[2m2026-01-11T07:03:39.4210332Z[0m [32m INFO[0m [2moffline_intelligence[0m[2m:[0m 🚀 Starting automatic model loading...
+[2m2026-01-11T07:03:39.4221559Z[0m [32m INFO[0m [2moffline_intelligence::runner[0m[2m:[0m Using 16 GPU layers + CPU fallback
+[2m2026-01-11T07:03:40.9688564Z[0m [32m INFO[0m [2moffline_intelligence::runner[0m[2m:[0m Primary GPU detected: 4 GB VRAM
+[2m2026-01-11T07:03:40.9689607Z[0m [32m INFO[0m [2moffline_intelligence::runner[0m[2m:[0m Small GPU detected (4 GB), using GPU/CPU split: 11 layers on GPU, 5 layers on CPU
+[2m2026-01-11T07:03:40.9689941Z[0m [32m INFO[0m [2moffline_intelligence::runner[0m[2m:[0m Using optimized tensor split: 11
+[2m2026-01-11T07:03:40.9863019Z[0m [32m INFO[0m [2moffline_intelligence::runner[0m[2m:[0m Spawned llama (pid=Some(11544)) on port 8001 with 16 gpu layers
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU, compute capability 8.6, VMM: yes
+load_backend: loaded CUDA backend from E:\_Aud.io\crates\offline-intelligence\Resources\bin\Windows\llama-b6970-bin-win-cuda-12.4-x64\ggml-cuda.dll
+load_backend: loaded RPC backend from E:\_Aud.io\crates\offline-intelligence\Resources\bin\Windows\llama-b6970-bin-win-cuda-12.4-x64\ggml-rpc.dll
+load_backend: loaded CPU backend from E:\_Aud.io\crates\offline-intelligence\Resources\bin\Windows\llama-b6970-bin-win-cuda-12.4-x64\ggml-cpu-icelake.dll
+main: setting n_parallel = 4 and kv_unified = true (add -kvu to disable this)
+build: 6970 (7f09a680a) with clang version 19.1.5 for x86_64-pc-windows-msvc
+system info: n_threads = 6, n_threads_batch = 6, total_threads = 12
+
+system_info: n_threads = 6 (n_threads_batch = 6) / 12 | CUDA : ARCHS = 500,610,700,750,800,860,890 | USE_GRAPHS = 1 | PEER_MAX_BATCH_SIZE = 128 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: binding port with default address family
+main: HTTP server is listening, hostname: 127.0.0.1, port: 8001, http threads: 11
+main: loading model
+srv    load_model: loading model 'E:/_Aud.io/crates/offline-intelligence/Resources/models/gguf-model.gguf'
+llama_model_load_from_file_impl: using device CUDA0 (NVIDIA GeForce RTX 3050 Ti Laptop GPU) (0000:01:00.0) - 3289 MiB free
+srv  log_server_r: request: GET /health 127.0.0.1 503
+llama_model_loader: loaded meta data with 40 key-value pairs and 196 tensors from E:/_Aud.io/crates/offline-intelligence/Resources/models/gguf-model.gguf (version GGUF V3 (latest))
+llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+llama_model_loader: - kv   0:                       general.architecture str              = phi3
+llama_model_loader: - kv   1:              phi3.rope.scaling.attn_factor f32              = 1.190238
+llama_model_loader: - kv   2:                               general.type str              = model
+llama_model_loader: - kv   3:                               general.name str              = Phi 4 Mini Instruct
+llama_model_loader: - kv   4:                           general.finetune str              = instruct
+llama_model_loader: - kv   5:                           general.basename str              = Phi-4
+llama_model_loader: - kv   6:                         general.size_label str              = mini
+llama_model_loader: - kv   7:                            general.license str              = mit
+llama_model_loader: - kv   8:                       general.license.link str              = https://huggingface.co/microsoft/Phi-...
+llama_model_loader: - kv   9:                               general.tags arr[str,3]       = ["nlp", "code", "text-generation"]
+llama_model_loader: - kv  10:                          general.languages arr[str,1]       = ["multilingual"]
+llama_model_loader: - kv  11:                        phi3.context_length u32              = 131072
+llama_model_loader: - kv  12:  phi3.rope.scaling.original_context_length u32              = 4096
+llama_model_loader: - kv  13:                      phi3.embedding_length u32              = 3072
+llama_model_loader: - kv  14:                   phi3.feed_forward_length u32              = 8192
+llama_model_loader: - kv  15:                           phi3.block_count u32              = 32
+llama_model_loader: - kv  16:                  phi3.attention.head_count u32              = 24
+llama_model_loader: - kv  17:               phi3.attention.head_count_kv u32              = 8
+llama_model_loader: - kv  18:      phi3.attention.layer_norm_rms_epsilon f32              = 0.000010
+llama_model_loader: - kv  19:                  phi3.rope.dimension_count u32              = 96
+llama_model_loader: - kv  20:                        phi3.rope.freq_base f32              = 10000.000000
+llama_model_loader: - kv  21:              phi3.attention.sliding_window u32              = 262144
+llama_model_loader: - kv  22:                       tokenizer.ggml.model str              = gpt2
+llama_model_loader: - kv  23:                         tokenizer.ggml.pre str              = gpt-4o
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv  log_server_r: request: GET /health 127.0.0.1 503
+llama_model_loader: - kv  24:                      tokenizer.ggml.tokens arr[str,200064]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+llama_model_loader: - kv  25:                  tokenizer.ggml.token_type arr[i32,200064]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+srv  log_server_r: request: GET /health 127.0.0.1 503
+llama_model_loader: - kv  26:                      tokenizer.ggml.merges arr[str,199742]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "e r", ...
+llama_model_loader: - kv  27:                tokenizer.ggml.bos_token_id u32              = 199999
+llama_model_loader: - kv  28:                tokenizer.ggml.eos_token_id u32              = 199999
+llama_model_loader: - kv  29:            tokenizer.ggml.unknown_token_id u32              = 199999
+llama_model_loader: - kv  30:            tokenizer.ggml.padding_token_id u32              = 199999
+llama_model_loader: - kv  31:               tokenizer.ggml.add_bos_token bool             = false
+llama_model_loader: - kv  32:               tokenizer.ggml.add_eos_token bool             = false
+llama_model_loader: - kv  33:                    tokenizer.chat_template str              = {% for message in messages %}{% if me...
+llama_model_loader: - kv  34:               general.quantization_version u32              = 2
+llama_model_loader: - kv  35:                          general.file_type u32              = 18
+llama_model_loader: - kv  36:                      quantize.imatrix.file str              = /models_out/Phi-4-mini-instruct-GGUF/...
+llama_model_loader: - kv  37:                   quantize.imatrix.dataset str              = /training_dir/calibration_datav3.txt
+llama_model_loader: - kv  38:             quantize.imatrix.entries_count i32              = 128
+llama_model_loader: - kv  39:              quantize.imatrix.chunks_count i32              = 123
+llama_model_loader: - type  f32:   67 tensors
+llama_model_loader: - type q6_K:  129 tensors
+print_info: file format = GGUF V3 (latest)
+print_info: file type   = Q6_K
+print_info: file size   = 2.93 GiB (6.56 BPW) 
+load_hparams: Phi SWA is currently disabled - results might be suboptimal for some models (see https://github.com/ggml-org/llama.cpp/pull/13676)
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv  log_server_r: request: GET /health 127.0.0.1 503
+load: printing all EOG tokens:
+load:   - 199999 ('<|endoftext|>')
+load:   - 200020 ('<|end|>')
+load: special tokens cache size = 12
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv  log_server_r: request: GET /health 127.0.0.1 503
+load: token to piece cache size = 1.3333 MB
+print_info: arch             = phi3
+print_info: vocab_only       = 0
+print_info: n_ctx_train      = 131072
+print_info: n_embd           = 3072
+print_info: n_layer          = 32
+print_info: n_head           = 24
+print_info: n_head_kv        = 8
+print_info: n_rot            = 96
+print_info: n_swa            = 0
+print_info: is_swa_any       = 0
+print_info: n_embd_head_k    = 128
+print_info: n_embd_head_v    = 128
+print_info: n_gqa            = 3
+print_info: n_embd_k_gqa     = 1024
+print_info: n_embd_v_gqa     = 1024
+print_info: f_norm_eps       = 0.0e+00
+print_info: f_norm_rms_eps   = 1.0e-05
+print_info: f_clamp_kqv      = 0.0e+00
+print_info: f_max_alibi_bias = 0.0e+00
+print_info: f_logit_scale    = 0.0e+00
+print_info: f_attn_scale     = 0.0e+00
+print_info: n_ff             = 8192
+print_info: n_expert         = 0
+print_info: n_expert_used    = 0
+print_info: n_expert_groups  = 0
+print_info: n_group_used     = 0
+print_info: causal attn      = 1
+print_info: pooling type     = 0
+print_info: rope type        = 2
+print_info: rope scaling     = linear
+print_info: freq_base_train  = 10000.0
+print_info: freq_scale_train = 1
+print_info: n_ctx_orig_yarn  = 4096
+print_info: rope_finetuned   = unknown
+print_info: model type       = 3B
+print_info: model params     = 3.84 B
+print_info: general.name     = Phi 4 Mini Instruct
+print_info: vocab type       = BPE
+print_info: n_vocab          = 200064
+print_info: n_merges         = 199742
+print_info: BOS token        = 199999 '<|endoftext|>'
+print_info: EOS token        = 199999 '<|endoftext|>'
+print_info: EOT token        = 199999 '<|endoftext|>'
+print_info: UNK token        = 199999 '<|endoftext|>'
+print_info: PAD token        = 199999 '<|endoftext|>'
+print_info: LF token         = 198 'Ċ'
+print_info: EOG token        = 199999 '<|endoftext|>'
+print_info: EOG token        = 200020 '<|end|>'
+print_info: max token length = 256
+load_tensors: loading model tensors, this can take a while... (mmap = true)
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv  log_server_r: request: GET /health 127.0.0.1 503
+load_tensors: offloading 16 repeating layers to GPU
+load_tensors: offloaded 16/33 layers to GPU
+load_tensors:   CPU_Mapped model buffer size =  1741.19 MiB
+load_tensors:        CUDA0 model buffer size =  1260.38 MiB
+.....................................srv  log_server_r: request: GET /health 127.0.0.1 503
+.srv  log_server_r: request: GET /health 127.0.0.1 503
+...error: process didn't exit successfully: `target\release\offline-intelligence.exe` (exit code: 0xc000013a, STATUS_CONTROL_C_EXIT)
