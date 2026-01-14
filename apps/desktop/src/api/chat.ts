@@ -1,4 +1,4 @@
-// apps/desktop/src/api/chat.ts
+// Chat API: stream SSE responses from local backend (127.0.0.1:8000)
 
 export interface Message {
     role: 'system' | 'user' | 'assistant';
@@ -13,8 +13,10 @@ export interface ChatRequest {
     stream?: boolean;
 }
 
+// Backend base URL (Axum/Tauri API)
 const API_Base = 'http://localhost:8000';
 
+// Stream assistant tokens via Server-Sent Events (delta chunks)
 export async function* streamChat(messages: Message[]): AsyncGenerator<string, void, unknown> {
     const response = await fetch(`${API_Base}/generate/stream`, {
         method: 'POST',

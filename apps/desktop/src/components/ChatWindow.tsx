@@ -1,12 +1,15 @@
-// apps/desktop/src/components/ChatWindow.tsx
+// Chat window: message bubbles, streaming responses, and top action bar
 import React, { useState, useRef, useEffect } from 'react';
 import type { Message } from '../api/chat';
 import { streamChat } from '../api/chat';
 
 export const ChatWindow: React.FC = () => {
+    // Initialize with a system prompt (not shown in feed)
     const [messages, setMessages] = useState<Message[]>([
         { role: 'system', content: 'You are a helpful assistant.' }
     ]);
+
+    // Compact input bar state
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -30,7 +33,7 @@ export const ChatWindow: React.FC = () => {
         setIsLoading(true);
 
         try {
-            // Append a placeholder for assistant response
+            // Placeholder assistant message to stream into
             setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
 
             let fullContent = '';
@@ -53,84 +56,89 @@ export const ChatWindow: React.FC = () => {
         }
     };
 
-    const handleKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            handleSend();
-        }
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        handleSend();
     };
 
     return (
-        <div className="flex flex-col h-screen bg-gray-900 text-gray-100 font-sans">
+        <div className="chat-window">
             {/* Header */}
-            <header className="p-4 border-b border-gray-800 flex justify-between items-center bg-gray-900/50 backdrop-blur-sm sticky top-0 z-10">
-                <h1 className="text-xl font-semibold bg-gradient-to-r from-blue-400 to-teal-400 bg-clip-text text-transparent">
-                    Offline Intelligence
-                </h1>
-                <div className="flex gap-2 text-xs text-gray-500">
-                    <span className="px-2 py-1 rounded bg-gray-800 border border-gray-700">Local LLM</span>
+            <header className="chat-header">
+                <div className="chat-header-bar">
+                    <div className="chat-title">Local LLM</div>
+                    <div className="header-actions">
+                        <button type="button" className="header-button">
+                            <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 9l9-6m0 0h-5m5 0v5M5 7v11a2 2 0 002 2h10a2 2 0 002-2v-6" />
+                            </svg>
+                            <span>Share</span>
+                        </button>
+                        <button type="button" className="header-icon-button" aria-label="More options">
+                            <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm0 8a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm0 8a1.5 1.5 0 110-3 1.5 1.5 0 010 3z" />
+                            </svg>
+                        </button>
+                    </div>
                 </div>
             </header>
 
             {/* Messages Area */}
-            <main className="flex-1 overflow-y-auto p-4 space-y-6">
-                {messages.filter(m => m.role !== 'system').map((msg, idx) => (
-                    <div
-                        key={idx}
-                        className={`group flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                    >
-                        <div
-                            className={`max-w-[80%] rounded-2xl px-5 py-3 shadow-sm ${msg.role === 'user'
-                                    ? 'bg-blue-600 text-white rounded-br-sm'
-                                    : 'bg-gray-800 text-gray-100 rounded-bl-sm border border-gray-700'
-                                }`}
-                        >
-                            <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
-                        </div>
-                    </div>
-                ))}
-
-                {isLoading && messages[messages.length - 1]?.role !== 'assistant' && (
-                    <div className="flex justify-start animate-pulse">
-                        <div className="bg-gray-800 rounded-2xl px-5 py-4 border border-gray-700">
-                            <div className="flex gap-1.5">
-                                <div className="w-1.5 h-1.5 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                                <div className="w-1.5 h-1.5 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                                <div className="w-1.5 h-1.5 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+            <main className="chat-messages">
+                <div className="chat-messages-container">
+                    {messages.filter(m => m.role !== 'system').map((msg, idx) => (
+                        <div key={idx} className={`message-wrapper ${msg.role}`}>
+                            <div className={`message-bubble ${msg.role}`}>
+                                <p className="message-text">{msg.content}</p>
                             </div>
                         </div>
-                    </div>
-                )}
-
-                <div ref={messagesEndRef} />
+                    ))}
+                    {isLoading && (
+                        <div className="message-wrapper assistant">
+                            <div className="loading-bubble">
+                                <div className="loading-dot" />
+                                <div className="loading-dot" />
+                                <div className="loading-dot" />
+                            </div>
+                        </div>
+                    )}
+                    <div ref={messagesEndRef} />
+                </div>
             </main>
 
-            {/* Input Area */}
-            <footer className="p-4 border-t border-gray-800 bg-gray-900">
-                <div className="max-w-4xl mx-auto relative cursor-text">
-                    <textarea
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyDown={handleKeyDown}
-                        placeholder="Message Offline Intelligence..."
-                        className="w-full bg-gray-800 text-gray-100 border border-gray-700 rounded-xl px-4 py-4 pr-12 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 resize-none max-h-48 overflow-y-auto transition-all placeholder:text-gray-500"
-                        rows={1}
-                        style={{ minHeight: '56px' }}
-                    />
-                    <button
-                        onClick={handleSend}
-                        disabled={isLoading || !input.trim()}
-                        className="absolute right-3 bottom-3 p-2 rounded-lg bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600 transition-colors"
-                    >
-                        <svg className="w-5 h-5 transform rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                        </svg>
-                    </button>
-                </div>
-                <div className="text-center mt-2 text-xs text-gray-600">
-                    AI can make mistakes. Please verify important information.
-                </div>
+            {/* Input Footer */}
+            <footer className="chat-footer">
+                <form onSubmit={handleSubmit} className="chat-input-container">
+                    <div className="chat-input-wrapper">
+                        <button type="button" className="input-button">
+                            <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                            </svg>
+                        </button>
+                        <input
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            placeholder="Ask anything"
+                            className="chat-input"
+                        />
+                        <button type="button" className="input-button">
+                            <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                            </svg>
+                        </button>
+                        <button 
+                            type="submit" 
+                            disabled={isLoading || !input.trim()}
+                            className="input-button send"
+                        >
+                            <svg className="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                            </svg>
+                        </button>
+                    </div>
+                    <p className="chat-footer-text">AI can make mistakes. Please verify important information.</p>
+                </form>
             </footer>
         </div>
     );
-};
+}

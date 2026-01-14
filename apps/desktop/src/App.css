@@ -1,42 +1,325 @@
-#root {
-  max-width: 1280px;
+/* ChatGPT-style UI Styles */
+
+/* Sidebar Styles */
+.sidebar {
+  width: 260px;
+  height: 100vh;
+  background-color: #1f1f1f;
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  flex-shrink: 0;
+}
+
+.sidebar-button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px;
+  border-radius: 8px;
+  background-color: transparent;
+  border: none;
+  color: #ececec;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  text-align: left;
+}
+
+.sidebar-button:hover {
+  background-color: #2f2f2f;
+}
+
+.sidebar-button.primary {
+  border: 1px solid #565869;
+  margin-bottom: 8px;
+}
+
+.sidebar-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #8e8ea0;
+  padding: 12px;
+  margin-top: 8px;
+}
+
+.sidebar-chat-item {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background-color: transparent;
+  border: none;
+  color: #ececec;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  text-align: left;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-chat-item:hover {
+  background-color: #2f2f2f;
+}
+
+.sidebar-footer {
+  padding: 12px;
+  margin-top: auto;
+  border-top: 1px solid #2f2f2f;
+  font-size: 12px;
+  color: #8e8ea0;
+}
+
+/* Chat Window Styles */
+.chat-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100%;
+  background-color: #ffffff;
+}
+
+/* UI overhaul: ChatGPT-like layout (sidebar, bubbles, header, pill input) */
+.chat-header {
+  border-bottom: 1px solid #e5e5e5;
+  padding: 12px 16px;
+  background-color: #ffffff;
+}
+.chat-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chat-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f1f1f;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid #e5e5e5;
+  background: #f8f8f8;
+  color: #1f1f1f;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.header-button:hover {
+  background: #f0f0f0;
+  border-color: #d8d8d8;
+}
+
+.header-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid #e5e5e5;
+  background: #f8f8f8;
+  color: #1f1f1f;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.header-icon-button:hover {
+  background: #f0f0f0;
+  border-color: #d8d8d8;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 16px;
+  background-color: #f9f9f9;
+}
+
+.chat-messages-container {
+  max-width: 768px;
   margin: 0 auto;
-  padding: 2rem;
+}
+
+.message-wrapper {
+  display: flex;
+  margin-bottom: 24px;
+}
+
+.message-wrapper.user {
+  justify-content: flex-end;
+}
+
+.message-wrapper.assistant {
+  justify-content: flex-start;
+}
+
+.message-bubble {
+  max-width: 70%;
+  padding: 16px 20px;
+  border-radius: 18px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.message-bubble.user {
+  background-color: #2563eb;
+  color: #ffffff;
+}
+
+.message-bubble.assistant {
+  background-color: #ffffff;
+  color: #1f1f1f;
+  border: 1px solid #e5e5e5;
+}
+
+.message-text {
+  font-size: 15px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.loading-bubble {
+  display: flex;
+  gap: 6px;
+  padding: 16px 20px;
+  background-color: #ffffff;
+  border: 1px solid #e5e5e5;
+  border-radius: 18px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.loading-dot {
+  width: 8px;
+  height: 8px;
+  background-color: #8e8ea0;
+  border-radius: 50%;
+  animation: bounce 1.4s infinite ease-in-out both;
+}
+
+.loading-dot:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.loading-dot:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes bounce {
+  0%, 80%, 100% {
+    transform: scale(0);
+  }
+  40% {
+    transform: scale(1);
+  }
+}
+
+/* Input Footer Styles */
+.chat-footer {
+  border-top: 1px solid #e5e5e5;
+  padding: 16px;
+  background-color: #ffffff;
+}
+
+.chat-input-container {
+  max-width: 768px;
+  margin: 0 auto;
+}
+
+.chat-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background-color: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 24px;
+  padding: 12px 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+
+.chat-input-wrapper:focus-within {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  border-color: #9ca3af;
+}
+
+.input-button {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: #6b7280;
+  transition: color 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.input-button:hover {
+  color: #1f1f1f;
+}
+
+.input-button.send {
+  background-color: #1f1f1f;
+  color: #ffffff;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  transition: background-color 0.2s;
+}
+
+.input-button.send:hover {
+  background-color: #2f2f2f;
+}
+
+.input-button.send:disabled {
+  background-color: #d1d5db;
+  cursor: not-allowed;
+}
+
+.chat-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 15px;
+  color: #1f1f1f;
+}
+
+.chat-input::placeholder {
+  color: #9ca3af;
+}
+
+.chat-footer-text {
+  margin-top: 8px;
   text-align: center;
+  font-size: 12px;
+  color: #6b7280;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+/* Icon styles */
+.icon {
+  width: 20px;
+  height: 20px;
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
-  }
-}
-
-.card {
-  padding: 2em;
-}
-
-.read-the-docs {
-  color: #888;
+.icon-sm {
+  width: 16px;
+  height: 16px;
 }
