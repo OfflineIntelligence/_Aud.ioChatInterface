@@ -133,6 +133,14 @@ async fn search_wrapper(
     api::search_api::search(State(state), Json(req)).await
 }
 
+// Wrapper to extract proxy state for title generation endpoint
+async fn generate_title_wrapper(
+    State(state): State<UnifiedAppState>,
+    Json(req): Json<api::GenerateTitleRequest>,
+) -> impl IntoResponse {
+    api::generate_title(State(state.proxy), Json(req)).await
+}
+
 async fn init_cache_manager(
     memory_database: Arc<MemoryDatabase>,
 ) -> anyhow::Result<Option<Arc<KVCacheManager>>> {
@@ -224,6 +232,7 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/generate/stream", post(proxy::generate_stream_endpoint))
+        .route("/generate/title", post(generate_title_wrapper))  // Chat title generation
         .route("/healthz", get(health_check))
         .route("/readyz", get(ready_check))
         .route("/metrics", get(metrics::get_metrics))

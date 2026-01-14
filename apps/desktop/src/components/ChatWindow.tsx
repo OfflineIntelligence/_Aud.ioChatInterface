@@ -1,18 +1,47 @@
 // Chat window: message bubbles, streaming responses, and top action bar
+// Receives messages/title from parent, notifies parent of updates
 import React, { useState, useRef, useEffect } from 'react';
 import type { Message } from '../api/chat';
 import { streamChat } from '../api/chat';
+import { useChatTitle } from '../hooks/useChatTitle';
 
-export const ChatWindow: React.FC = () => {
-    // Initialize with a system prompt (not shown in feed)
-    const [messages, setMessages] = useState<Message[]>([
-        { role: 'system', content: 'You are a helpful assistant.' }
-    ]);
+export interface Chat {
+    id: string;
+    title: string;
+    messages: Message[];
+    createdAt: Date;
+}
+
+interface ChatWindowProps {
+    messages: Message[];
+    chatTitle: string | null;
+    onMessagesUpdate: (messages: Message[]) => void;
+    onTitleGenerated?: (title: string) => void;
+}
+
+export const ChatWindow: React.FC<ChatWindowProps> = ({ 
+    messages, 
+    chatTitle,
+    onMessagesUpdate,
+    onTitleGenerated 
+}) => {
+    // Track if first prompt has been sent (for title generation)
+    const firstPromptSent = useRef(false);
 
     // Compact input bar state
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+
+    // Title generation hook
+    const { generateTitle } = useChatTitle();
+
+    // Reset title generation flag when new chat started
+    useEffect(() => {
+        if (!chatTitle) {
+            firstPromptSent.current = false;
+        }
+    }, [chatTitle]);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -26,31 +55,36 @@ export const ChatWindow: React.FC = () => {
         if (!input.trim() || isLoading) return;
 
         const userMsg: Message = { role: 'user', content: input };
+        const firstPrompt = !firstPromptSent.current ? input.trim() : null;
         const newMessages = [...messages, userMsg];
 
-        setMessages(newMessages);
+        onMessagesUpdate(newMessages);
         setInput('');
         setIsLoading(true);
 
+        // Generate title asynchronously in background (non-blocking)
+        if (firstPrompt && !chatTitle) {
+            firstPromptSent.current = true;
+            generateTitle(firstPrompt).then(title => {
+                if (title) {
+                    onTitleGenerated?.(title);
+                }
+            }).catch(err => console.error('Title generation failed:', err));
+        }
+
         try {
             // Placeholder assistant message to stream into
-            setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+            onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: '' }]);
 
             let fullContent = '';
             for await (const chunk of streamChat(newMessages)) {
                 fullContent += chunk;
-                setMessages(prev => {
-                    const updated = [...prev];
-                    const lastMsg = updated[updated.length - 1];
-                    if (lastMsg.role === 'assistant') {
-                        lastMsg.content = fullContent;
-                    }
-                    return updated;
-                });
+                const updated = [...newMessages, { role: 'assistant' as const, content: fullContent }];
+                onMessagesUpdate(updated);
             }
         } catch (error) {
             console.error('Chat error:', error);
-            setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, an error occurred.' }]);
+            onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: 'Sorry, an error occurred.' }]);
         } finally {
             setIsLoading(false);
         }
@@ -66,7 +100,7 @@ export const ChatWindow: React.FC = () => {
             {/* Header */}
             <header className="chat-header">
                 <div className="chat-header-bar">
-                    <div className="chat-title">Local LLM</div>
+                    <div className="chat-title">{chatTitle || 'Local LLM'}</div>
                     <div className="header-actions">
                         <button type="button" className="header-button">
                             <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">

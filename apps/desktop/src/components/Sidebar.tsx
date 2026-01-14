@@ -1,11 +1,20 @@
 // Sidebar: dark left navigation matching ChatGPT's structure
+// Displays all saved chats with clickable titles for switching
 import React from 'react'
+import type { Chat } from './ChatWindow'
 
-export const Sidebar: React.FC = () => {
+interface SidebarProps {
+  chats: Chat[];
+  activeChatId: string | null;
+  onNewChat?: () => void;
+  onSelectChat?: (chatId: string) => void;
+}
+
+export const Sidebar: React.FC<SidebarProps> = ({ chats, activeChatId, onNewChat, onSelectChat }) => {
   return (
     <div className="sidebar">
       {/* New Chat Button */}
-      <button className="sidebar-button primary">
+      <button className="sidebar-button primary" onClick={onNewChat}>
         <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
         </svg>
@@ -30,15 +39,32 @@ export const Sidebar: React.FC = () => {
       {/* Chat History */}
       <div className="sidebar-section-title">Your chats</div>
       <div style={{flex: 1, overflowY: 'auto'}}>
-        <button className="sidebar-chat-item">
-          Offline Intelligence – Welcome
-        </button>
-        <button className="sidebar-chat-item">
-          Prompt examples
-        </button>
-        <button className="sidebar-chat-item">
-          Local LLM quick test
-        </button>
+        {/* Render all saved chats with active highlighting */}
+        {chats.map(chat => (
+          <button 
+            key={chat.id}
+            className="sidebar-chat-item"
+            style={{ 
+              fontWeight: chat.id === activeChatId ? 'bold' : 'normal',
+              backgroundColor: chat.id === activeChatId ? '#2f2f2f' : 'transparent'
+            }}
+            onClick={() => onSelectChat?.(chat.id)}
+          >
+            {chat.title}
+          </button>
+        ))}
+        
+        {/* Show placeholder items when no chats exist */}
+        {chats.length === 0 && (
+          <>
+            <button className="sidebar-chat-item">
+              Prompt examples
+            </button>
+            <button className="sidebar-chat-item">
+              Local LLM quick test
+            </button>
+          </>
+        )}
       </div>
 
       {/* Footer */}
