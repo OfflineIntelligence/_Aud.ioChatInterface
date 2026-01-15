@@ -46,10 +46,11 @@ pub async fn generate_title(
         ));
     }
 
+    // Improved instruction: prioritize clarity and let LLM naturally generate 1-5 word titles
+    // rather than forcing truncation, which can create incomplete/nonsensical titles
     let title_instruction = format!(
-        "Summarize the following user prompt in 1-5 words as a concise chat title. \
-         Return only the title, nothing else.\n\n\
-         Prompt: {}",
+        "User prompt: {}\n\n\
+         Create a short, meaningful chat title using 1-5 words maximum that captures the essence of this prompt.",
         req.prompt
     );
 
@@ -62,7 +63,7 @@ pub async fn generate_title(
         "messages": [
             {
                 "role": "system",
-                "content": "You are a helpful assistant that generates short, concise chat titles. Always respond with only the title, no explanation."
+                "content": "You are a title generator. Create concise, meaningful chat titles in 1-5 words maximum. Prioritize clarity and relevance. Respond with ONLY the title, nothing else."
             },
             {
                 "role": "user",
@@ -90,21 +91,41 @@ pub async fn generate_title(
                     .and_then(|m| m.get("content"))
                     .and_then(|c| c.as_str())
                 {
-                    let title = content
+                    let mut title = content
                         .lines()
                         .next()
                         .unwrap_or(content)
                         .trim()
                         .to_string();
 
-                    // Limit to ~50 chars (roughly 5 words)
-                    let title = if title.len() > 50 {
-                        format!("{}...", &title[..47])
-                    } else {
-                        title
-                    };
+                    // Post-process title: remove prefixes, quotes, and validate output
+                    // Let model do the work of staying within 1-5 words naturally
+                    let prefixes_to_remove = [
+                        "Title: ",
+                        "title: ",
+                        "TITLE: ",
+                        "Chat title: ",
+                        "Short title: ",
+                        "Answer: ",
+                        "Response: ",
+                    ];
 
-                    info!("Generated title: {}", title);
+                    for prefix in &prefixes_to_remove {
+                        if title.starts_with(prefix) {
+                            title = title[prefix.len()..].trim().to_string();
+                            break;
+                        }
+                    }
+
+                    // Remove surrounding quotes if present
+                    if (title.starts_with('"') && title.ends_with('"')) ||
+                       (title.starts_with('\'') && title.ends_with('\'')) {
+                        title = title[1..title.len()-1].trim().to_string();
+                    }
+
+                    // Only log word count, let model generate natural 1-5 word titles
+                    let word_count = title.split_whitespace().count();
+                    info!("Generated title: '{}' ({} words)", title, word_count);
                     Ok(Json(GenerateTitleResponse { title }))
                 } else {
                     Err((

@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react'
 import { ChatWindow } from './components/ChatWindow'
 import { Sidebar } from './components/Sidebar'
+import { SearchModal } from './components/SearchModal'
 import type { Chat } from './components/ChatWindow'
 import type { Message } from './api/chat'
 import './App.css'
@@ -20,6 +21,9 @@ function App() {
   
   // Current chat title (null = not yet generated)
   const [currentChatTitle, setCurrentChatTitle] = useState<string | null>(null);
+
+  // Search modal state for chat history search functionality
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
 
   // Sync active chat's messages to history array for persistence
   // Updates chat transcript whenever user sends/receives messages
@@ -86,12 +90,20 @@ function App() {
         activeChatId={activeChatId}
         onNewChat={handleNewChat}
         onSelectChat={handleSelectChat}
+        onOpenSearch={() => setIsSearchOpen(true)} // Open search modal when sidebar search button clicked
       />
       <ChatWindow 
         messages={currentMessages}
         chatTitle={currentChatTitle}
         onMessagesUpdate={handleMessagesUpdate}
         onTitleGenerated={handleTitleGenerated}
+      />
+      {/* Search modal for finding and navigating to past chats */}
+      <SearchModal
+        isOpen={isSearchOpen}
+        chats={chats}
+        onClose={() => setIsSearchOpen(false)}
+        onSelectChat={handleSelectChat}
       />
     </div>
   )

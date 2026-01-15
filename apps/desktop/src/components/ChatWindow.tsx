@@ -100,13 +100,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             {/* Header */}
             <header className="chat-header">
                 <div className="chat-header-bar">
-                    <div className="chat-title">{chatTitle || 'Local LLM'}</div>
+                    {/* Display generated title or app name as fallback */}
+                    <div className="chat-title">{chatTitle || 'Aud.io'}</div>
                     <div className="header-actions">
+                        {/* Save button for exporting chat transcript to local device */}
                         <button type="button" className="header-button">
                             <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 9l9-6m0 0h-5m5 0v5M5 7v11a2 2 0 002 2h10a2 2 0 002-2v-6" />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                             </svg>
-                            <span>Share</span>
+                            <span>Save</span>
                         </button>
                         <button type="button" className="header-icon-button" aria-label="More options">
                             <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">

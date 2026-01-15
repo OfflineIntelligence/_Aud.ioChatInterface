@@ -8,9 +8,10 @@ interface SidebarProps {
   activeChatId: string | null;
   onNewChat?: () => void;
   onSelectChat?: (chatId: string) => void;
+  onOpenSearch?: () => void;
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({ chats, activeChatId, onNewChat, onSelectChat }) => {
+export const Sidebar: React.FC<SidebarProps> = ({ chats, activeChatId, onNewChat, onSelectChat, onOpenSearch }) => {
   return (
     <div className="sidebar">
       {/* New Chat Button */}
@@ -22,7 +23,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ chats, activeChatId, onNewChat
       </button>
 
       {/* Navigation Items */}
-      <button className="sidebar-button">
+      {/* Search button opens modal to find past conversations */}
+      <button className="sidebar-button" onClick={onOpenSearch}>
         <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
         </svg>
@@ -53,18 +55,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ chats, activeChatId, onNewChat
             {chat.title}
           </button>
         ))}
-        
-        {/* Show placeholder items when no chats exist */}
-        {chats.length === 0 && (
-          <>
-            <button className="sidebar-chat-item">
-              Prompt examples
-            </button>
-            <button className="sidebar-chat-item">
-              Local LLM quick test
-            </button>
-          </>
-        )}
       </div>
 
       {/* Footer */}
