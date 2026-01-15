@@ -95,6 +95,60 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         handleSend();
     };
 
+    // Download chat transcript as text file using browser download API
+    const handleSaveTranscript = async () => {
+        console.log('Save button clicked. Messages count:', messages.length);
+        
+        if (messages.length === 0) {
+            console.warn('No messages to save');
+            alert('No messages to save yet. Start a conversation first.');
+            return;
+        }
+
+        try {
+            // Format messages for export
+            let transcript = '';
+            if (chatTitle) {
+                transcript += `Chat: ${chatTitle}\n`;
+                transcript += `Date: ${new Date().toLocaleString()}\n`;
+                transcript += '='.repeat(60) + '\n\n';
+            }
+
+            // Process messages (skip system messages)
+            const filteredMessages = messages.filter(m => m.role !== 'system');
+            console.log('Filtered messages count:', filteredMessages.length);
+            
+            filteredMessages.forEach(msg => {
+                const sender = msg.role === 'user' ? 'User' : 'Offline Intelligence';
+                transcript += `${sender}:\n`;
+                transcript += `${msg.content}\n\n`;
+            });
+
+            console.log('Transcript generated, length:', transcript.length);
+
+            // Create blob and trigger download
+            const blob = new Blob([transcript], { type: 'text/plain;charset=utf-8' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
+            
+            console.log('Downloading file:', link.download);
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            // Clean up URL
+            setTimeout(() => URL.revokeObjectURL(link.href), 100);
+            
+            console.log('Download completed');
+            alert(`Chat saved as: ${link.download}`);
+        } catch (error) {
+            console.error('Error saving transcript:', error);
+            alert(`Error saving transcript:\n${error}`);
+        }
+    };
+
     return (
         <div className="chat-window">
             {/* Header */}
@@ -104,7 +158,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     <div className="chat-title">{chatTitle || 'Aud.io'}</div>
                     <div className="header-actions">
                         {/* Save button for exporting chat transcript to local device */}
-                        <button type="button" className="header-button">
+                        <button type="button" className="header-button" onClick={handleSaveTranscript} title="Download transcript as text file">
                             <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                             </svg>
