@@ -78,6 +78,11 @@ impl ContextOrchestrator {
         Ok(orchestrator)
     }
     
+    /// Chat persistence: Expose database for conversation API handlers
+    pub fn database(&self) -> &Arc<MemoryDatabase> {
+        &self.database
+    }
+    
     /// Process conversation and return optimized context
     pub async fn process_conversation(
         &self,
@@ -308,6 +313,11 @@ impl ContextOrchestrator {
     
     pub fn get_config(&self) -> &OrchestratorConfig {
         &self.config
+    }
+
+    // Chat persistence: Expose tier manager to ensure sessions exist before processing
+    pub fn tier_manager(&self) -> &Arc<RwLock<TierManager>> {
+        &self.tier_manager
     }
 }
 

@@ -5,14 +5,20 @@ import { Sidebar } from './components/Sidebar'
 import { SearchModal } from './components/SearchModal'
 import type { Chat } from './components/ChatWindow'
 import type { Message } from './api/chat'
+// Chat persistence: Load conversations from database on mount
+import { fetchConversations } from './api/chat'
+import { fetchConversation } from './api/chat'
 import './App.css'
 
 function App() {
   // Chat history: array of all chats
   const [chats, setChats] = useState<Chat[]>([]);
   
-  // Active chat ID (null = new chat in progress)
+  // Active chat ID (null = new chat in progress, but we generate one when first message is sent)
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  
+  // Session ID for backend persistence - generated on first message, used to link frontend chat with database session
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   
   // Current working messages (for active/new chat)
   const [currentMessages, setCurrentMessages] = useState<Message[]>([
@@ -24,6 +30,23 @@ function App() {
 
   // Search modal state for chat history search functionality
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  // Chat persistence: Load all saved conversations from database when app starts
+  useEffect(() => {
+    const loadConversations = async () => {
+      const conversations = await fetchConversations();
+      const loadedChats: Chat[] = conversations.map(conv => ({
+        id: conv.id,
+        title: conv.title,
+        messages: [],  // Messages loaded on demand when chat is selected
+        createdAt: new Date(conv.created_at),
+        pinned: false,
+      }));
+      setChats(loadedChats);
+    };
+    
+    loadConversations();
+  }, []);
 
   // Sync active chat's messages to history array for persistence
   // Updates chat transcript whenever user sends/receives messages
@@ -42,31 +65,54 @@ function App() {
   const handleTitleGenerated = (title: string) => {
     setCurrentChatTitle(title);
     
+    // Use the sessionId that was generated when the first message was sent
+    const chatId = currentSessionId || Date.now().toString();
+    
     const newChat: Chat = {
-      id: Date.now().toString(),
+      id: chatId,
       title,
       messages: currentMessages,
       createdAt: new Date()
     };
     
     setChats(prev => [newChat, ...prev]);
-    setActiveChatId(newChat.id);
+    setActiveChatId(chatId);
   };
 
   // Reset to blank conversation when "New chat" clicked
   const handleNewChat = () => {
     setActiveChatId(null);
+    setCurrentSessionId(null);
     setCurrentChatTitle(null);
     setCurrentMessages([{ role: 'system', content: 'You are a helpful assistant.' }]);
   };
   
   // Load selected chat from sidebar into active view
-  const handleSelectChat = (chatId: string) => {
+  const handleSelectChat = async (chatId: string) => {
     const chat = chats.find(c => c.id === chatId);
     if (chat) {
       setActiveChatId(chat.id);
       setCurrentChatTitle(chat.title);
-      setCurrentMessages(chat.messages);
+      
+      // If messages not loaded yet, fetch from database
+      if (chat.messages.length === 0) {
+        const conversation = await fetchConversation(chatId);
+        if (conversation) {
+          // Add system message if not present
+          const messages = conversation.messages[0]?.role === 'system' 
+            ? conversation.messages 
+            : [{ role: 'system' as const, content: 'You are a helpful assistant.' }, ...conversation.messages];
+          
+          setCurrentMessages(messages);
+          
+          // Update chat in state with loaded messages
+          setChats(prev => prev.map(c => 
+            c.id === chatId ? { ...c, messages } : c
+          ));
+        }
+      } else {
+        setCurrentMessages(chat.messages);
+      }
     }
   };
   
@@ -114,6 +160,8 @@ function App() {
         messages={currentMessages}
         chatTitle={currentChatTitle}
         chatId={activeChatId}
+        sessionId={currentSessionId}
+        onSessionIdChange={setCurrentSessionId}
         isPinned={chats.find(c => c.id === activeChatId)?.pinned}
         onMessagesUpdate={handleMessagesUpdate}
         onTitleGenerated={handleTitleGenerated}

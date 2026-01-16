@@ -122,10 +122,27 @@ pub async fn generate_stream_endpoint(
 ) -> Result<Response, (StatusCode, String)> {
     info!("📥 Received generate_stream request");
     
+    // Chat persistence: Enforce session_id requirement - no fallback to prevent orphaned data
     let session_id = payload.get("session_id")
         .and_then(Value::as_str)
-        .unwrap_or("default_session")
-        .to_string();
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            (StatusCode::BAD_REQUEST, "Missing required field: session_id".to_string())
+        })?;
+
+    // Chat persistence: Create session BEFORE processing to prevent race with title updates
+    // Title generation happens async in frontend while streaming, needs session to exist first
+    {
+        let orchestrator_guard = state.context_orchestrator.read().await;
+        if let Some(orchestrator) = &*orchestrator_guard {
+            let tier_manager = orchestrator.tier_manager().read().await;
+            if let Err(e) = tier_manager.ensure_session_exists(&session_id, None).await {
+                warn!("Failed to create session {}: {}", session_id, e);
+            } else {
+                info!("✅ Ensured session {} exists in database", session_id);
+            }
+        }
+    }
 
     let raw_messages = payload.get("messages")
         .and_then(Value::as_array)

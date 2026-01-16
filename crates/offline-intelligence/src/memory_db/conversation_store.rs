@@ -176,6 +176,53 @@ impl ConversationStore {
         Ok(Session { id: session_id, created_at: now, last_accessed: now, metadata })
     }
 
+    /// Chat persistence: Create session with frontend-provided ID to maintain ID consistency across frontend and backend
+    pub fn create_session_with_id(&self, session_id: &str, metadata: Option<SessionMetadata>) -> anyhow::Result<Session> {
+        let now = Utc::now();
+        let metadata = metadata.unwrap_or_default();
+        let metadata_json = serde_json::to_string(&metadata)?;
+        
+        let conn = self.get_conn()?;
+        conn.execute(
+            "INSERT INTO sessions (id, created_at, last_accessed, metadata) VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, now.to_rfc3339(), now.to_rfc3339(), metadata_json],
+        )?;
+        
+        info!("Created session with ID: {}", session_id);
+        Ok(Session { id: session_id.to_string(), created_at: now, last_accessed: now, metadata })
+    }
+
+    /// Chat persistence: Update session title after auto-generation, also refresh last_accessed
+    pub fn update_session_title(&self, session_id: &str, title: &str) -> anyhow::Result<()> {
+        let conn = self.get_conn()?;
+        
+        // Fetch current metadata
+        let mut stmt = conn.prepare("SELECT metadata FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query([session_id])?;
+        
+        if let Some(row) = rows.next()? {
+            let metadata_json: String = row.get(0)?;
+            let mut metadata: SessionMetadata = serde_json::from_str(&metadata_json)
+                .unwrap_or_default();
+            
+            // Update title
+            metadata.title = Some(title.to_string());
+            let updated_metadata_json = serde_json::to_string(&metadata)?;
+            
+            // Update session with new metadata and timestamp
+            let now = Utc::now();
+            conn.execute(
+                "UPDATE sessions SET metadata = ?1, last_accessed = ?2 WHERE id = ?3",
+                params![updated_metadata_json, now.to_rfc3339(), session_id],
+            )?;
+            
+            info!("Updated session {} title to: {}", session_id, title);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Session {} not found", session_id))
+        }
+    }
+
     pub fn get_session(&self, session_id: &str) -> anyhow::Result<Option<Session>> {
         let conn = self.get_conn()?;
         let mut stmt = conn.prepare("SELECT id, created_at, last_accessed, metadata FROM sessions WHERE id = ?1")?;
@@ -186,6 +233,22 @@ impl ConversationStore {
         } else {
             Ok(None)
         }
+    }
+
+    /// Chat persistence: Retrieve all sessions for sidebar display, ordered by recency
+    pub fn get_all_sessions(&self) -> anyhow::Result<Vec<Session>> {
+        let conn = self.get_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, created_at, last_accessed, metadata FROM sessions ORDER BY last_accessed DESC"
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut sessions = Vec::new();
+        
+        while let Some(row) = rows.next()? {
+            sessions.push(self.row_to_session(row)?);
+        }
+        
+        Ok(sessions)
     }
 
     // --- Parsing Logic ---

@@ -2,7 +2,8 @@
 // Receives messages/title from parent, notifies parent of updates
 import React, { useState, useRef, useEffect } from 'react';
 import type { Message } from '../api/chat';
-import { streamChat } from '../api/chat';
+// Chat persistence: Import title update function to save generated titles to database
+import { streamChat, updateConversationTitle } from '../api/chat';
 import { useChatTitle } from '../hooks/useChatTitle';
 import { save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
@@ -19,6 +20,8 @@ interface ChatWindowProps {
     messages: Message[];
     chatTitle: string | null;
     chatId: string | null;
+    sessionId: string | null;
+    onSessionIdChange: (sessionId: string) => void;
     isPinned?: boolean;
     onMessagesUpdate: (messages: Message[]) => void;
     onTitleGenerated?: (title: string) => void;
@@ -30,6 +33,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     messages, 
     chatTitle,
     chatId,
+    sessionId,
+    onSessionIdChange,
     isPinned = false,
     onMessagesUpdate,
     onTitleGenerated,
@@ -86,6 +91,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     const handleSend = async () => {
         if (!input.trim() || isLoading) return;
 
+        // Generate unique session ID on first message (timestamp-based) for backend persistence
+        let currentSessionId = sessionId;
+        if (!currentSessionId) {
+            currentSessionId = Date.now().toString();
+            onSessionIdChange(currentSessionId);
+        }
+
         const userMsg: Message = { role: 'user', content: input };
         const firstPrompt = !firstPromptSent.current ? input.trim() : null;
         const newMessages = [...messages, userMsg];
@@ -99,6 +111,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             firstPromptSent.current = true;
             generateTitle(firstPrompt).then(title => {
                 if (title) {
+                    // Persist generated title to database for cross-session recovery
+                    updateConversationTitle(currentSessionId, title).then(success => {
+                        if (success) {
+                            console.log('Title saved to database:', title);
+                        }
+                    }).catch(err => console.error('Failed to save title to database:', err));
+                    
+                    // Update UI
                     onTitleGenerated?.(title);
                 }
             }).catch(err => console.error('Title generation failed:', err));
@@ -109,7 +129,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: '' }]);
 
             let fullContent = '';
-            for await (const chunk of streamChat(newMessages)) {
+            for await (const chunk of streamChat(newMessages, currentSessionId)) {
                 fullContent += chunk;
                 const updated = [...newMessages, { role: 'assistant' as const, content: fullContent }];
                 onMessagesUpdate(updated);

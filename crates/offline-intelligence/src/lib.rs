@@ -233,6 +233,10 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/generate/stream", post(proxy::generate_stream_endpoint))
         .route("/generate/title", post(generate_title_wrapper))  // Chat title generation
+        // Chat persistence: REST API routes for conversation management
+        .route("/conversations", get(api::get_conversations))  // List all saved conversations
+        .route("/conversations/:id", get(api::get_conversation))  // Get full conversation with messages
+        .route("/conversations/:id/title", post(api::update_conversation_title))  // Save generated title
         .route("/healthz", get(health_check))
         .route("/readyz", get(ready_check))
         .route("/metrics", get(metrics::get_metrics))
