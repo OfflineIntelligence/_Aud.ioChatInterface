@@ -4,6 +4,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import type { Message } from '../api/chat';
 import { streamChat } from '../api/chat';
 import { useChatTitle } from '../hooks/useChatTitle';
+import { save } from '@tauri-apps/plugin-dialog';
+import { writeTextFile } from '@tauri-apps/plugin-fs';
 
 export interface Chat {
     id: string;
@@ -95,7 +97,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         handleSend();
     };
 
-    // Download chat transcript as text file using browser download API
+    // Download chat transcript as text file - works in both Tauri and browser
     const handleSaveTranscript = async () => {
         console.log('Save button clicked. Messages count:', messages.length);
         
@@ -126,23 +128,44 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
             console.log('Transcript generated, length:', transcript.length);
 
-            // Create blob and trigger download
-            const blob = new Blob([transcript], { type: 'text/plain;charset=utf-8' });
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
+            // Check if running in Tauri
+            const isTauri = '__TAURI__' in window;
             
-            console.log('Downloading file:', link.download);
-            
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            
-            // Clean up URL
-            setTimeout(() => URL.revokeObjectURL(link.href), 100);
-            
-            console.log('Download completed');
-            alert(`Chat saved as: ${link.download}`);
+            if (isTauri) {
+                // Use Tauri's native file dialog and file system
+                const defaultFileName = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
+                const filePath = await save({
+                    defaultPath: defaultFileName,
+                    filters: [{
+                        name: 'Text',
+                        extensions: ['txt']
+                    }]
+                });
+
+                if (filePath) {
+                    await writeTextFile(filePath, transcript);
+                    console.log('File saved via Tauri:', filePath);
+                    alert(`Chat saved successfully!`);
+                }
+            } else {
+                // Use browser's download API
+                const blob = new Blob([transcript], { type: 'text/plain;charset=utf-8' });
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
+                
+                console.log('Downloading file:', link.download);
+                
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                // Clean up URL
+                setTimeout(() => URL.revokeObjectURL(link.href), 100);
+                
+                console.log('Download completed');
+                alert(`Chat saved as: ${link.download}`);
+            }
         } catch (error) {
             console.error('Error saving transcript:', error);
             alert(`Error saving transcript:\n${error}`);

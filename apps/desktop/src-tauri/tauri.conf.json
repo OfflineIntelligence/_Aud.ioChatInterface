@@ -18,8 +18,23 @@
             }
         ],
         "security": {
-            "csp": null
-        }
+            "csp": null,
+            "capabilities": [
+                {
+                    "identifier": "main-capability",
+                    "windows": ["main"],
+                    "permissions": [
+                        "core:default",
+                        "shell:default",
+                        "dialog:default",
+                        "fs:default",
+                        "fs:allow-write-text-file",
+                        "dialog:allow-save"
+                    ]
+                }
+            ]
+        },
+        "macOSPrivateApi": false
     },
     "bundle": {
         "active": true,
