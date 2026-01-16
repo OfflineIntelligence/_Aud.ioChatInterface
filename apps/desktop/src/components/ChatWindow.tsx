@@ -12,20 +12,29 @@ export interface Chat {
     title: string;
     messages: Message[];
     createdAt: Date;
+    pinned?: boolean;
 }
 
 interface ChatWindowProps {
     messages: Message[];
     chatTitle: string | null;
+    chatId: string | null;
+    isPinned?: boolean;
     onMessagesUpdate: (messages: Message[]) => void;
     onTitleGenerated?: (title: string) => void;
+    onPinChat?: (chatId: string) => void;
+    onDeleteChat?: (chatId: string) => void;
 }
 
 export const ChatWindow: React.FC<ChatWindowProps> = ({ 
     messages, 
     chatTitle,
+    chatId,
+    isPinned = false,
     onMessagesUpdate,
-    onTitleGenerated 
+    onTitleGenerated,
+    onPinChat,
+    onDeleteChat
 }) => {
     // Track if first prompt has been sent (for title generation)
     const firstPromptSent = useRef(false);
@@ -34,6 +43,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    
+    // Dropdown menu state
+    const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+    const dropdownRef = useRef<HTMLDivElement>(null);
+    
+    // Delete confirmation modal state
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
     // Title generation hook
     const { generateTitle } = useChatTitle();
@@ -44,6 +60,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             firstPromptSent.current = false;
         }
     }, [chatTitle]);
+
+    // Close dropdown when clicking outside
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+                setIsDropdownOpen(false);
+            }
+        };
+
+        if (isDropdownOpen) {
+            document.addEventListener('mousedown', handleClickOutside);
+            return () => document.removeEventListener('mousedown', handleClickOutside);
+        }
+    }, [isDropdownOpen]);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -187,11 +217,48 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                             </svg>
                             <span>Save</span>
                         </button>
-                        <button type="button" className="header-icon-button" aria-label="More options">
-                            <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm0 8a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm0 8a1.5 1.5 0 110-3 1.5 1.5 0 010 3z" />
-                            </svg>
-                        </button>
+                        <div style={{ position: 'relative' }} ref={dropdownRef}>
+                            <button 
+                                type="button" 
+                                className="header-icon-button" 
+                                aria-label="More options"
+                                onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+                            >
+                                <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm0 8a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm0 8a1.5 1.5 0 110-3 1.5 1.5 0 010 3z" />
+                                </svg>
+                            </button>
+                            
+                            {/* Dropdown Menu */}
+                            {isDropdownOpen && chatId && (
+                                <div className="dropdown-menu">
+                                    <button 
+                                        className="dropdown-item"
+                                        onClick={() => {
+                                            onPinChat?.(chatId);
+                                            setIsDropdownOpen(false);
+                                        }}
+                                    >
+                                        <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                                        </svg>
+                                        <span>{isPinned ? 'Unpin chat' : 'Pin chat'}</span>
+                                    </button>
+                                    <button 
+                                        className="dropdown-item delete"
+                                        onClick={() => {
+                                            // Open confirmation modal before any delete happens
+                                            setShowDeleteConfirm(true);
+                                        }}
+                                    >
+                                        <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                        </svg>
+                                        <span>Delete</span>
+                                    </button>
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </div>
             </header>
@@ -252,6 +319,43 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     <p className="chat-footer-text">AI can make mistakes. Please verify important information.</p>
                 </form>
             </footer>
+            
+            {/* Delete Confirmation Modal */}
+            {showDeleteConfirm && (
+                <div className="modal-overlay">
+                    <div className="modal">
+                        <div className="modal-header">
+                            <svg className="modal-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4v2m0 4v2m0-14a9 9 0 110 18 9 9 0 010-18zm0 0a9 9 0 110 18 9 9 0 010-18z" />
+                            </svg>
+                        </div>
+                        <h2 className="modal-title">Delete Chat</h2>
+                        <p className="modal-message">Are you sure you want to delete this chat?</p>
+                        <div className="modal-buttons">
+                            <button 
+                                className="modal-button cancel"
+                                onClick={() => {
+                                    setShowDeleteConfirm(false);
+                                    setIsDropdownOpen(false);
+                                }}
+                            >
+                                Cancel
+                            </button>
+                            <button 
+                                className="modal-button delete"
+                                onClick={() => {
+                                    // Final confirm: delete the active chat
+                                    onDeleteChat?.(chatId!);
+                                    setShowDeleteConfirm(false);
+                                    setIsDropdownOpen(false);
+                                }}
+                            >
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

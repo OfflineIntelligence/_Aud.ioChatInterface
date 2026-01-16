@@ -83,6 +83,24 @@ function App() {
     }
   };
 
+  // Toggle pin status for a chat
+  const handlePinChat = (chatId: string) => {
+    setChats(prev => prev.map(chat =>
+      chat.id === chatId
+        ? { ...chat, pinned: !chat.pinned }
+        : chat
+    ));
+  };
+
+  // Delete a chat and reset to new chat if it was active
+  const handleDeleteChat = (chatId: string) => {
+    setChats(prev => prev.filter(chat => chat.id !== chatId));
+    
+    if (activeChatId === chatId) {
+      handleNewChat();
+    }
+  };
+
   return (
     <div style={{ display: 'flex', height: '100vh', width: '100vw', overflow: 'hidden' }}>
       <Sidebar 
@@ -95,8 +113,12 @@ function App() {
       <ChatWindow 
         messages={currentMessages}
         chatTitle={currentChatTitle}
+        chatId={activeChatId}
+        isPinned={chats.find(c => c.id === activeChatId)?.pinned}
         onMessagesUpdate={handleMessagesUpdate}
         onTitleGenerated={handleTitleGenerated}
+        onPinChat={handlePinChat}
+        onDeleteChat={handleDeleteChat}
       />
       {/* Search modal for finding and navigating to past chats */}
       <SearchModal

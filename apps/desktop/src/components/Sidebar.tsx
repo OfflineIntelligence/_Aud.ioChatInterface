@@ -41,18 +41,36 @@ export const Sidebar: React.FC<SidebarProps> = ({ chats, activeChatId, onNewChat
       {/* Chat History */}
       <div className="sidebar-section-title">Your chats</div>
       <div style={{flex: 1, overflowY: 'auto'}}>
-        {/* Render all saved chats with active highlighting */}
-        {chats.map(chat => (
+        {/* Render all saved chats with active highlighting, pinned chats at top */}
+        {chats
+          .sort((a, b) => {
+            // Pinned chats first
+            if (a.pinned && !b.pinned) return -1;
+            if (!a.pinned && b.pinned) return 1;
+            // Then by creation date (newest first)
+            return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+          })
+          .map(chat => (
           <button 
             key={chat.id}
             className="sidebar-chat-item"
             style={{ 
               fontWeight: chat.id === activeChatId ? 'bold' : 'normal',
-              backgroundColor: chat.id === activeChatId ? '#2f2f2f' : 'transparent'
+              backgroundColor: chat.id === activeChatId ? '#2f2f2f' : 'transparent',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
             }}
             onClick={() => onSelectChat?.(chat.id)}
           >
-            {chat.title}
+            {chat.pinned && (
+              <svg className="icon" fill="currentColor" viewBox="0 0 24 24" style={{ width: '14px', height: '14px', flexShrink: 0 }}>
+                <path d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+              </svg>
+            )}
+            <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {chat.title}
+            </span>
           </button>
         ))}
       </div>
