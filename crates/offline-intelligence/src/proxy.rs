@@ -36,22 +36,21 @@ async fn optimize_context(
 ) -> Vec<Message> {
     let orchestrator_guard = state.context_orchestrator.read().await;
     
-    // Let context orchestrator process the conversation
     if let Some(orchestrator) = &*orchestrator_guard {
         match orchestrator.process_conversation(session_id, &messages, user_query).await {
             Ok(optimized) => {
                 debug!("Context optimized: {} -> {} messages", messages.len(), optimized.len());
-                optimized
+                return optimized;
             }
             Err(e) => {
                 warn!("Context optimization failed: {}, using original", e);
-                messages
             }
         }
     } else {
         warn!("Context orchestrator not available, using original messages");
-        messages
     }
+    
+    messages
 }
 
 /// A wrapper stream that captures the assistant's response as it flows through

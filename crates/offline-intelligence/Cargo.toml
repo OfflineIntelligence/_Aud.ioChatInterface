@@ -58,3 +58,4 @@ validator = { version = "0.16", features = ["derive"] }
 rayon = "1.8"
 bytes = "1.5"
 which = "1.0"
+base64 = "0.21"

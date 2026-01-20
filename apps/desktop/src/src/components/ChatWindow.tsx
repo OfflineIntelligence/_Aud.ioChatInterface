@@ -1,7 +1,6 @@
 // apps/desktop/src/components/ChatWindow.tsx
 import React, { useState, useRef, useEffect } from 'react';
-import type { Message } from '../api/chat';
-import { streamChat } from '../api/chat';
+import { Message, streamChat } from '../api/chat';
 
 export const ChatWindow: React.FC = () => {
     const [messages, setMessages] = useState<Message[]>([

@@ -4,9 +4,9 @@
     "version": "0.1.0",
     "identifier": "com.offline-intelligence.app",
     "build": {
-        "beforeDevCommand": "",
+        "beforeDevCommand": "npm run dev",
         "beforeBuildCommand": "npm run build",
-        "frontendDist": "../src/dist"
+        "devUrl": "http://localhost:1420"
     },
     "app": {
         "windows": [

@@ -46,7 +46,7 @@ pub async fn health(
         Json(HealthResponse {
             status: "healthy".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            uptime_seconds: 0, // TODO: Track actual uptime
+            uptime_seconds: 0
         }),
     ))
 }
@@ -55,7 +55,7 @@ pub async fn health(
 pub async fn db_stats(
     State(_state): State<UnifiedAppState>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // TODO: Implement actual database statistics
+
     Ok((
         StatusCode::OK,
         Json(DbStatsResponse {
@@ -72,7 +72,7 @@ pub async fn maintenance(
     State(_state): State<UnifiedAppState>,
     Json(_payload): Json<MaintenanceRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // TODO: Implement maintenance operations
+
     Ok((
         StatusCode::NOT_IMPLEMENTED,
         Json(serde_json::json!({

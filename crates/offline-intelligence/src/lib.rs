@@ -14,6 +14,7 @@ pub mod runner;
 pub mod cache_management;
 pub mod telemetry;
 pub mod utils;
+pub mod voice;
 
 pub use admin::*;
 pub use backend_target::*;
@@ -22,6 +23,7 @@ pub use metrics::*;
 pub use proxy::*;
 pub use runner::*;
 pub use cache_management::*;
+pub use voice::*;
 
 use axum::{
     Router,
@@ -126,13 +128,6 @@ async fn memory_cleanup_wrapper(
     api::memory_cleanup(State(state), Json(req)).await
 }
 
-async fn search_wrapper(
-    State(state): State<UnifiedAppState>,
-    Json(req): Json<api::search_api::SearchRequest>,
-) -> impl IntoResponse {
-    api::search_api::search(State(state), Json(req)).await
-}
-
 async fn init_cache_manager(
     memory_database: Arc<MemoryDatabase>,
 ) -> anyhow::Result<Option<Arc<KVCacheManager>>> {
@@ -233,7 +228,12 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
         .route("/memory/optimize", post(memory_optimize_wrapper))
         .route("/memory/stats/:session_id", get(memory_stats_wrapper))
         .route("/memory/cleanup", post(memory_cleanup_wrapper))
-        .route("/search", post(search_wrapper))
+        // Voice API routes
+        .route("/voice/health", get(api::voice_api::voice_health))
+        .route("/voice/start-recording", post(api::voice_api::start_recording))
+        .route("/voice/process-audio", post(api::voice_api::process_audio_chunk))
+        .route("/voice/stop-recording", post(api::voice_api::stop_recording))
+        .route("/voice/synthesize", post(api::voice_api::synthesize_speech))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(ConcurrencyLimitLayer::new(cfg.max_concurrent_streams as usize))

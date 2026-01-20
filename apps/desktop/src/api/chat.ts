@@ -13,7 +13,7 @@ export interface ChatRequest {
     stream?: boolean;
 }
 
-const API_Base = 'http://localhost:8000';
+const API_Base = 'http://127.0.0.1:8080';
 
 export async function* streamChat(messages: Message[]): AsyncGenerator<string, void, unknown> {
     const response = await fetch(`${API_Base}/generate/stream`, {

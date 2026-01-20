@@ -275,27 +275,6 @@ impl ContextOrchestrator {
         })
     }
     
-    /// Search messages across sessions by keywords
-    pub async fn search_messages(
-        &self,
-        session_id: Option<&str>,
-        keywords: &[String],
-        limit: usize,
-    ) -> anyhow::Result<Vec<crate::memory_db::StoredMessage>> {
-        if keywords.is_empty() {
-            return Ok(Vec::new());
-        }
-        
-        if let Some(sid) = session_id {
-            // Search within specific session
-            self.database.search_messages_by_keywords(sid, keywords, limit).await
-        } else {
-            // Search across all sessions (would need cross-session search implementation)
-            // For now, return empty results for global search
-            Ok(Vec::new())
-        }
-    }
-    
     pub fn set_enabled(&mut self, enabled: bool) {
         self.config.enabled = enabled;
         info!("Context engine {}", if enabled { "enabled" } else { "disabled" });
