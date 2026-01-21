@@ -8,6 +8,8 @@ import type { Message } from './api/chat'
 // Chat persistence: Load conversations from database on mount
 import { fetchConversations } from './api/chat'
 import { fetchConversation } from './api/chat'
+// Chat persistence: Delete conversations permanently from database
+import { deleteConversation } from './api/chat'
 import './App.css'
 
 function App() {
@@ -139,7 +141,19 @@ function App() {
   };
 
   // Delete a chat and reset to new chat if it was active
-  const handleDeleteChat = (chatId: string) => {
+  // Now async to wait for database deletion before updating UI state
+  const handleDeleteChat = async (chatId: string) => {
+    console.log('handleDeleteChat called for:', chatId);
+    // Delete from database first; surface failure to caller so UI can show feedback
+    const success = await deleteConversation(chatId);
+    console.log('deleteConversation returned:', success);
+
+    if (!success) {
+      // Throw error so ChatWindow can show user-facing alert
+      throw new Error('Failed to delete conversation from database');
+    }
+
+    // Only remove from local state if database delete succeeded (prevents ghost chats)
     setChats(prev => prev.filter(chat => chat.id !== chatId));
     
     if (activeChatId === chatId) {

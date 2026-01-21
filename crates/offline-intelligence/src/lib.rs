@@ -25,7 +25,7 @@ pub use cache_management::*;
 
 use axum::{
     Router,
-    routing::{get, post},
+    routing::{get, post, delete},
     extract::{State, FromRef, Path},  // Added FromRef here
     response::IntoResponse,
     Json,
@@ -227,7 +227,8 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST])
+        // Allow DELETE method for conversation removal (fixes CORS blocking browser delete requests)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers(Any);
 
     let app = Router::new()
@@ -236,7 +237,8 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
         // Chat persistence: REST API routes for conversation management
         .route("/conversations", get(api::get_conversations))  // List all saved conversations
         .route("/conversations/:id", get(api::get_conversation))  // Get full conversation with messages
-        .route("/conversations/:id/title", post(api::update_conversation_title))  // Save generated title
+        .route("/conversations/:id/title", post(api::update_conversation_title))  // Update conversation title
+        .route("/conversations/:id", delete(api::delete_conversation))  // Delete conversation from database
         .route("/healthz", get(health_check))
         .route("/readyz", get(ready_check))
         .route("/metrics", get(metrics::get_metrics))

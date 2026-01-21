@@ -178,3 +178,35 @@ pub async fn update_conversation_title(
         Err((StatusCode::SERVICE_UNAVAILABLE, "Memory system not available").into_response())
     }
 }
+
+/// Delete a conversation permanently from the database
+/// Called via DELETE /conversations/:id from frontend
+/// Returns success JSON or error status code with message
+pub async fn delete_conversation(
+    State(state): State<UnifiedAppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    info!("Deleting conversation: {}", session_id);
+    
+    let orchestrator_lock = state.context_orchestrator.read().await;
+    
+    if let Some(ref orchestrator) = *orchestrator_lock {
+        match orchestrator.database().conversations.delete_session(&session_id) {
+            Ok(_) => {
+                info!("Successfully deleted conversation: {}", session_id);
+                Ok(Json(serde_json::json!({
+                    "success": true,
+                    "id": session_id
+                })))
+            }
+            Err(e) => {
+                error!("Failed to delete conversation: {}", e);
+                // Return detailed error to help with debugging
+                Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)).into_response())
+            }
+        }
+    } else {
+        error!("Context orchestrator not initialized");
+        Err((StatusCode::SERVICE_UNAVAILABLE, "Memory system not available").into_response())
+    }
+}

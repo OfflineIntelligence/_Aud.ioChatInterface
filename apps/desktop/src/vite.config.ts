@@ -10,8 +10,9 @@ export default defineConfig({
   // 1. prevent vite from obscuring rust errors
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
+  // Environment-aware port: 1420 for Tauri (set via TAURI_ENV_FAMILY), 3000 for browser
   server: {
-    port: 1420,
-    strictPort: true,
+    port: process.env.TAURI_ENV_FAMILY ? 1420 : 3000,
+    strictPort: process.env.TAURI_ENV_FAMILY ? true : false,  // Strict for Tauri, flexible for browser
   },
 })

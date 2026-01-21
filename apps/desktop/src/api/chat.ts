@@ -149,3 +149,23 @@ export async function updateConversationTitle(id: string, title: string): Promis
         return false;
     }
 }
+
+// Chat persistence: Delete a conversation permanently from the database
+// Returns boolean to indicate success; caller handles user-facing error messages
+export async function deleteConversation(id: string): Promise<boolean> {
+    try {
+        const response = await fetch(`${API_Base}/conversations/${id}`, {
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return true;  // Database deletion successful
+    } catch (error) {
+        console.error('Failed to delete conversation:', error);
+        return false;  // Network or backend error
+    }
+}

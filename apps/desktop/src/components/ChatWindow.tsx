@@ -5,8 +5,12 @@ import type { Message } from '../api/chat';
 // Chat persistence: Import title update function to save generated titles to database
 import { streamChat, updateConversationTitle } from '../api/chat';
 import { useChatTitle } from '../hooks/useChatTitle';
+// Tauri native file dialogs (desktop only)
 import { save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
+// Custom dialogs for environments without native file picker support
+import { SaveTranscriptDialog } from './SaveTranscriptDialog';
+import { SaveTranscriptWebDialog } from './SaveTranscriptWebDialog';
 
 export interface Chat {
     id: string;
@@ -26,7 +30,8 @@ interface ChatWindowProps {
     onMessagesUpdate: (messages: Message[]) => void;
     onTitleGenerated?: (title: string) => void;
     onPinChat?: (chatId: string) => void;
-    onDeleteChat?: (chatId: string) => void;
+    // Now returns Promise to support async database deletion with error handling
+    onDeleteChat?: (chatId: string) => Promise<void>;
 }
 
 export const ChatWindow: React.FC<ChatWindowProps> = ({ 
@@ -55,6 +60,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     
     // Delete confirmation modal state
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    // Track deletion in progress to disable button and show loading state
+    const [isDeleting, setIsDeleting] = useState(false);
 
     // Title generation hook
     const { generateTitle } = useChatTitle();
@@ -148,6 +155,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     };
 
     // Download chat transcript as text file - works in both Tauri and browser
+    // State for managing custom save dialogs (needed for dev popup environment)
+    const [showSaveDialog, setShowSaveDialog] = useState(false);
+    const [showWebSaveDialog, setShowWebSaveDialog] = useState(false);
+    const [pendingTranscript, setPendingTranscript] = useState<string>('');
+    const [pendingDefaultName, setPendingDefaultName] = useState<string>('chat.txt');
+
     const handleSaveTranscript = async () => {
         console.log('Save button clicked. Messages count:', messages.length);
         
@@ -171,59 +184,86 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             console.log('Filtered messages count:', filteredMessages.length);
             
             filteredMessages.forEach(msg => {
-                const sender = msg.role === 'user' ? 'User' : 'Offline Intelligence';
+                // Updated from "Offline Intelligence" to "Aud.io" branding
+                const sender = msg.role === 'user' ? 'User' : 'Aud.io';
                 transcript += `${sender}:\n`;
                 transcript += `${msg.content}\n\n`;
             });
 
             console.log('Transcript generated, length:', transcript.length);
 
-            // Check if running in Tauri
-            const isTauri = '__TAURI__' in window;
+            // Simplified detection: localhost = always use web dialog for dev consistency
+            const isLocalhost = window.location.hostname === 'localhost';
+            const hasTauriGlobal = '__TAURI__' in window;
             
-            if (isTauri) {
-                // Use Tauri's native file dialog and file system
-                const defaultFileName = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
-                const filePath = await save({
-                    defaultPath: defaultFileName,
-                    filters: [{
-                        name: 'Text',
-                        extensions: ['txt']
-                    }]
-                });
+            console.log('[SAVE DEBUG] hostname:', window.location.hostname);
+            console.log('[SAVE DEBUG] isLocalhost:', isLocalhost);
+            console.log('[SAVE DEBUG] __TAURI__ in window:', hasTauriGlobal);
+            console.log('[SAVE DEBUG] protocol:', window.location.protocol);
+            console.log('[SAVE DEBUG] port:', window.location.port);
+            
+            if (isLocalhost) {
+                // Any localhost dev environment: use web dialog (dev popup, main window, browser)
+                console.log('[SAVE] Localhost detected - showing web dialog modal');
+                setPendingTranscript(transcript);
+                setPendingDefaultName(`${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`);
+                setShowWebSaveDialog(true);
+            } else if (hasTauriGlobal) {
+                // Production Tauri desktop: use native OS file picker
+                console.log('[SAVE] Production Tauri desktop - using native dialog');
+                try {
+                    const defaultFileName = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
+                    const filePath = await save({
+                        defaultPath: defaultFileName,
+                        filters: [{ name: 'Text', extensions: ['txt'] }]
+                    });
 
-                if (filePath) {
-                    await writeTextFile(filePath, transcript);
-                    console.log('File saved via Tauri:', filePath);
-                    alert(`Chat saved successfully!`);
+                    if (filePath) {
+                        await writeTextFile(filePath, transcript);
+                        console.log('[SAVE] ✅ File saved via Tauri:', filePath);
+                    } else {
+                        console.log('[SAVE] Tauri dialog cancelled');
+                    }
+                } catch (tauriError) {
+                    console.error('[SAVE] ❌ Tauri save() error:', tauriError);
+                    alert('Failed to open save dialog. Please try again.');
                 }
             } else {
-                // Use browser's download API
+                // Non-localhost browser: standard download
+                console.log('[SAVE] Browser (non-localhost) - triggering download');
                 const blob = new Blob([transcript], { type: 'text/plain;charset=utf-8' });
                 const link = document.createElement('a');
                 link.href = URL.createObjectURL(blob);
                 link.download = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
-                
-                console.log('Downloading file:', link.download);
-                
                 document.body.appendChild(link);
                 link.click();
                 document.body.removeChild(link);
-                
-                // Clean up URL
                 setTimeout(() => URL.revokeObjectURL(link.href), 100);
-                
-                console.log('Download completed');
-                alert(`Chat saved as: ${link.download}`);
+                console.log('[SAVE] Browser download triggered');
             }
         } catch (error) {
             console.error('Error saving transcript:', error);
-            alert(`Error saving transcript:\n${error}`);
         }
     };
 
+    const defaultFileName = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
+
     return (
         <div className="chat-window">
+            <SaveTranscriptDialog
+                open={showSaveDialog}
+                defaultFileName={pendingDefaultName}
+                content={pendingTranscript}
+                onClose={() => setShowSaveDialog(false)}
+                onSaved={(p) => { setShowSaveDialog(false); console.log('[SAVE] Saved via custom picker at', p); }}
+            />
+            <SaveTranscriptWebDialog
+                open={showWebSaveDialog}
+                defaultFileName={pendingDefaultName}
+                content={pendingTranscript}
+                onClose={() => setShowWebSaveDialog(false)}
+                onSaved={(info) => { setShowWebSaveDialog(false); console.log('[SAVE] Saved via web dialog:', info); }}
+            />
             {/* Header */}
             <header className="chat-header">
                 <div className="chat-header-bar">
@@ -363,14 +403,40 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                             </button>
                             <button 
                                 className="modal-button delete"
+                                disabled={!chatId || isDeleting}
                                 onClick={() => {
-                                    // Final confirm: delete the active chat
-                                    onDeleteChat?.(chatId!);
-                                    setShowDeleteConfirm(false);
-                                    setIsDropdownOpen(false);
+                                    console.log('🗑️ Delete button clicked for chat:', chatId);
+                                    // Async wrapper to handle database deletion with proper error feedback
+                                    const deleteChat = async () => {
+                                        try {
+                                            if (!chatId) {
+                                                alert('No chat selected to delete.');
+                                                return;
+                                            }
+                                            if (!onDeleteChat) {
+                                                alert('Delete action is unavailable.');
+                                                return;
+                                            }
+
+                                            setIsDeleting(true);
+                                            console.log('📤 Calling onDeleteChat...');
+                                            await onDeleteChat(chatId);
+                                            console.log('✅ Chat deleted successfully');
+                                            setShowDeleteConfirm(false);
+                                            setIsDropdownOpen(false);
+                                        } catch (error) {
+                                            console.error('❌ Error deleting chat:', error);
+                                            // Show user-friendly error message from backend or network failure
+                                            alert('Failed to delete chat: ' + (error instanceof Error ? error.message : String(error)));
+                                        } finally {
+                                            // Always reset loading state even if deletion failed
+                                            setIsDeleting(false);
+                                        }
+                                    };
+                                    deleteChat();
                                 }}
                             >
-                                Delete
+                                {isDeleting ? 'Deleting…' : 'Delete'}
                             </button>
                         </div>
                     </div>
