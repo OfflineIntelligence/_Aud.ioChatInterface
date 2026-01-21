@@ -192,25 +192,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
             console.log('Transcript generated, length:', transcript.length);
 
-            // Simplified detection: localhost = always use web dialog for dev consistency
-            const isLocalhost = window.location.hostname === 'localhost';
-            const hasTauriGlobal = '__TAURI__' in window;
-            
+            // Environment detection
+            const isTauri = '__TAURI__' in window;
+            const port = window.location.port;
+            const isDevPopup = port === '1420' && !isTauri; // Tauri dev opens a browser popup to the dev server
+
             console.log('[SAVE DEBUG] hostname:', window.location.hostname);
-            console.log('[SAVE DEBUG] isLocalhost:', isLocalhost);
-            console.log('[SAVE DEBUG] __TAURI__ in window:', hasTauriGlobal);
+            console.log('[SAVE DEBUG] isTauri:', isTauri);
             console.log('[SAVE DEBUG] protocol:', window.location.protocol);
-            console.log('[SAVE DEBUG] port:', window.location.port);
-            
-            if (isLocalhost) {
-                // Any localhost dev environment: use web dialog (dev popup, main window, browser)
-                console.log('[SAVE] Localhost detected - showing web dialog modal');
-                setPendingTranscript(transcript);
-                setPendingDefaultName(`${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`);
-                setShowWebSaveDialog(true);
-            } else if (hasTauriGlobal) {
-                // Production Tauri desktop: use native OS file picker
-                console.log('[SAVE] Production Tauri desktop - using native dialog');
+            console.log('[SAVE DEBUG] port:', port);
+
+            if (isTauri) {
+                // Tauri desktop (native window): use the OS file picker via Tauri dialog
+                console.log('[SAVE] Tauri desktop detected - using native save dialog');
                 try {
                     const defaultFileName = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
                     const filePath = await save({
@@ -228,18 +222,47 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     console.error('[SAVE] ❌ Tauri save() error:', tauriError);
                     alert('Failed to open save dialog. Please try again.');
                 }
+            } else if (isDevPopup) {
+                // Tauri dev popup in the browser: show confirmation modal before saving
+                console.log('[SAVE] Dev popup detected - showing web confirmation modal');
+                setPendingTranscript(transcript);
+                setPendingDefaultName(`${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`);
+                setShowWebSaveDialog(true);
             } else {
-                // Non-localhost browser: standard download
-                console.log('[SAVE] Browser (non-localhost) - triggering download');
-                const blob = new Blob([transcript], { type: 'text/plain;charset=utf-8' });
-                const link = document.createElement('a');
-                link.href = URL.createObjectURL(blob);
-                link.download = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                setTimeout(() => URL.revokeObjectURL(link.href), 100);
-                console.log('[SAVE] Browser download triggered');
+                // Regular browser (e.g., localhost:3000): show the native browser file picker directly
+                console.log('[SAVE] Browser detected - opening default save file picker');
+                const name = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
+                const anyWindow = window as any;
+                try {
+                    if (anyWindow.showSaveFilePicker) {
+                        const handle = await anyWindow.showSaveFilePicker({
+                            suggestedName: name,
+                            types: [{ description: 'Text', accept: { 'text/plain': ['.txt'] } }]
+                        });
+                        const writable = await handle.createWritable();
+                        await writable.write(transcript);
+                        await writable.close();
+                        console.log('[SAVE] ✅ Saved via browser picker');
+                    } else {
+                        // Fallback to simple download
+                        const blob = new Blob([transcript], { type: 'text/plain;charset=utf-8' });
+                        const link = document.createElement('a');
+                        link.href = URL.createObjectURL(blob);
+                        link.download = name;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        setTimeout(() => URL.revokeObjectURL(link.href), 100);
+                        console.log('[SAVE] Fallback browser download triggered');
+                    }
+                } catch (e) {
+                    if ((e as any)?.name === 'AbortError') {
+                        console.log('[SAVE] Browser picker cancelled');
+                    } else {
+                        console.error('[SAVE] ❌ Browser save failed:', e);
+                        alert('Failed to save the file.');
+                    }
+                }
             }
         } catch (error) {
             console.error('Error saving transcript:', error);
