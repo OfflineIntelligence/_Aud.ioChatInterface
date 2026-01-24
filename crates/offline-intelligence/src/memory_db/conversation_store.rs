@@ -314,6 +314,16 @@ impl ConversationStore {
         Ok(messages)
     }
 
+    pub fn get_session_message_count(&self, session_id: &str) -> anyhow::Result<usize> {
+        let conn = self.get_conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0)
+        )?;
+        Ok(count as usize)
+    }
+
     pub fn mark_embedding_generated(&self, message_id: i64) -> anyhow::Result<()> {
         let conn = self.get_conn()?;
         conn.execute("UPDATE messages SET embedding_generated = TRUE WHERE id = ?1", [message_id])?;
