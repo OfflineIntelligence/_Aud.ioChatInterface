@@ -94,10 +94,15 @@ export const SearchModal: React.FC<SearchModalProps> = ({
         matchCount += 2; // Weight title matches higher
       }
 
-      // Search in all messages
+      // Search in all messages (case-insensitive, safe string matching)
+      const lowerQuery = query.toLowerCase();
       chat.messages.forEach(msg => {
-        const contentMatches = (msg.content.match(new RegExp(query, 'gi')) || []).length;
-        matchCount += contentMatches;
+        const lowerContent = msg.content.toLowerCase();
+        let pos = 0;
+        while ((pos = lowerContent.indexOf(lowerQuery, pos)) !== -1) {
+          matchCount++;
+          pos += lowerQuery.length;
+        }
       });
 
       if (matchCount > 0) {

@@ -35,7 +35,8 @@ pub async fn generate_title(
     State(state): State<AppState>,
     Json(req): Json<GenerateTitleRequest>,
 ) -> Result<Json<GenerateTitleResponse>, (StatusCode, Json<ErrorResponse>)> {
-    info!("Generating title for prompt: {:?}", req.prompt);
+    // Security: Log prompt length instead of full content to prevent sensitive data leakage
+    info!("Generating title for prompt (length: {} chars)", req.prompt.len());
 
     if req.prompt.is_empty() {
         return Err((

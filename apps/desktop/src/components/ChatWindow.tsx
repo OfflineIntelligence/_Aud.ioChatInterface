@@ -269,8 +269,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         }
     };
 
-    const defaultFileName = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
-
     return (
         <div className="chat-window">
             <SaveTranscriptDialog

@@ -67,14 +67,21 @@ function App() {
   const handleTitleGenerated = (title: string) => {
     setCurrentChatTitle(title);
     
-    // Use the sessionId that was generated when the first message was sent
-    const chatId = currentSessionId || Date.now().toString();
+    // Use the sessionId that was generated when the first message was sent.
+    // Avoid generating a synthetic ID here to keep frontend and backend IDs in sync.
+    if (!currentSessionId) {
+      console.error('handleTitleGenerated called without a currentSessionId; cannot create chat entry.');
+      return;
+    }
+    
+    const chatId = currentSessionId;
     
     const newChat: Chat = {
       id: chatId,
       title,
       messages: currentMessages,
-      createdAt: new Date()
+      createdAt: new Date(),
+      pinned: false // Explicitly initialize pinned state
     };
     
     setChats(prev => [newChat, ...prev]);
@@ -135,7 +142,7 @@ function App() {
   const handlePinChat = (chatId: string) => {
     setChats(prev => prev.map(chat =>
       chat.id === chatId
-        ? { ...chat, pinned: !chat.pinned }
+        ? { ...chat, pinned: !(chat.pinned ?? false) } // Explicit handling of undefined pinned property
         : chat
     ));
   };
