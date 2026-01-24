@@ -96,7 +96,13 @@ export const SearchModal: React.FC<SearchModalProps> = ({
 
       // Search in all messages
       chat.messages.forEach(msg => {
-        const contentMatches = (msg.content.match(new RegExp(query, 'gi')) || []).length;
+        const content = msg.content.toLowerCase();
+        let startIndex = 0;
+        let contentMatches = 0;
+        while ((startIndex = content.indexOf(query, startIndex)) !== -1) {
+          contentMatches++;
+          startIndex++;
+        }
         matchCount += contentMatches;
       });
 

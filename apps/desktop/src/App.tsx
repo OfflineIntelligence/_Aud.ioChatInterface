@@ -67,8 +67,14 @@ function App() {
   const handleTitleGenerated = (title: string) => {
     setCurrentChatTitle(title);
     
-    // Use the sessionId that was generated when the first message was sent
-    const chatId = currentSessionId || Date.now().toString();
+    // Use the sessionId that was generated when the first message was sent.
+    // Avoid generating a synthetic ID here to keep frontend and backend IDs in sync.
+    if (!currentSessionId) {
+      console.error('handleTitleGenerated called without a currentSessionId; cannot create chat entry.');
+      return;
+    }
+    
+    const chatId = currentSessionId;
     
     const newChat: Chat = {
       id: chatId,
