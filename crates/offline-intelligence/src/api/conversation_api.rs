@@ -27,6 +27,7 @@ pub struct ConversationSummary {
     pub created_at: String,
     pub last_accessed: String,
     pub message_count: usize,
+    pub pinned: bool,
 }
 
 /// Response for fetching a specific conversation's messages
@@ -61,10 +62,9 @@ pub async fn get_conversations(
                     // Only include sessions that have a title (completed chats)
                     // Skip sessions without titles - these are in-progress and not ready to show
                     if let Some(ref title) = session.metadata.title {
-                        // Get message count for this session
+                        // Get message count for this session using COUNT query
                         let message_count = orchestrator.database().conversations
-                            .get_session_messages(&session.id, None, None)
-                            .map(|msgs| msgs.len())
+                            .get_session_message_count(&session.id)
                             .unwrap_or(0);
                         
                         conversations.push(ConversationSummary {
@@ -73,6 +73,7 @@ pub async fn get_conversations(
                             created_at: session.created_at.to_rfc3339(),
                             last_accessed: session.last_accessed.to_rfc3339(),
                             message_count,
+                            pinned: session.metadata.pinned,
                         });
                     }
                 }
@@ -169,8 +170,15 @@ pub async fn update_conversation_title(
                 })))
             }
             Err(e) => {
-                error!("Failed to update conversation title: {}", e);
-                Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)).into_response())
+                let error_msg = e.to_string();
+                // Check if the error is due to session not found
+                if error_msg.contains("not found") {
+                    error!("Conversation not found: {}", session_id);
+                    Err((StatusCode::NOT_FOUND, format!("Conversation not found: {}", session_id)).into_response())
+                } else {
+                    error!("Failed to update conversation title: {}", e);
+                    Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)).into_response())
+                }
             }
         }
     } else {
@@ -192,17 +200,66 @@ pub async fn delete_conversation(
     
     if let Some(ref orchestrator) = *orchestrator_lock {
         match orchestrator.database().conversations.delete_session(&session_id) {
-            Ok(_) => {
-                info!("Successfully deleted conversation: {}", session_id);
-                Ok(Json(serde_json::json!({
-                    "success": true,
-                    "id": session_id
-                })))
+            Ok(deleted_count) => {
+                if deleted_count == 0 {
+                    info!("Conversation not found for deletion: {}", session_id);
+                    Err((StatusCode::NOT_FOUND, format!("Conversation not found: {}", session_id)).into_response())
+                } else {
+                    info!("Successfully deleted conversation: {}", session_id);
+                    Ok(Json(serde_json::json!({
+                        "success": true,
+                        "id": session_id
+                    })))
+                }
             }
             Err(e) => {
                 error!("Failed to delete conversation: {}", e);
                 // Return detailed error to help with debugging
                 Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)).into_response())
+            }
+        }
+    } else {
+        error!("Context orchestrator not initialized");
+        Err((StatusCode::SERVICE_UNAVAILABLE, "Memory system not available").into_response())
+    }
+}
+
+/// Request to update a conversation's pinned status
+#[derive(Debug, Deserialize)]
+pub struct UpdatePinnedRequest {
+    pub pinned: bool,
+}
+
+/// Update a conversation's pinned status
+pub async fn update_conversation_pinned(
+    State(state): State<UnifiedAppState>,
+    Path(session_id): Path<String>,
+    Json(req): Json<UpdatePinnedRequest>,
+) -> Result<Json<Value>, Response> {
+    info!("Updating pinned status for conversation: {} to {}", session_id, req.pinned);
+    
+    let orchestrator_lock = state.context_orchestrator.read().await;
+    
+    if let Some(ref orchestrator) = *orchestrator_lock {
+        match orchestrator.database().conversations.update_session_pinned(&session_id, req.pinned) {
+            Ok(_) => {
+                info!("Successfully updated pinned status for conversation: {}", session_id);
+                Ok(Json(serde_json::json!({
+                    "success": true,
+                    "id": session_id,
+                    "pinned": req.pinned
+                })))
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                // Check if the error is due to session not found
+                if error_msg.contains("not found") {
+                    error!("Conversation not found: {}", session_id);
+                    Err((StatusCode::NOT_FOUND, format!("Conversation not found: {}", session_id)).into_response())
+                } else {
+                    error!("Failed to update conversation pinned status: {}", e);
+                    Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)).into_response())
+                }
             }
         }
     } else {

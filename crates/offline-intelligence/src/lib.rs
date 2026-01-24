@@ -243,6 +243,7 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
         .route("/conversations", get(api::get_conversations))  // List all saved conversations
         .route("/conversations/:id", get(api::get_conversation))  // Get full conversation with messages
         .route("/conversations/:id/title", post(api::update_conversation_title))  // Update conversation title
+        .route("/conversations/:id/pinned", post(api::update_conversation_pinned))  // Update conversation pinned status
         .route("/conversations/:id", delete(api::delete_conversation))  // Delete conversation from database
         .route("/healthz", get(health_check))
         .route("/readyz", get(ready_check))

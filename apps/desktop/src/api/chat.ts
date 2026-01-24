@@ -20,6 +20,7 @@ export interface ConversationSummary {
     created_at: string;
     last_accessed: string;
     message_count: number;
+    pinned: boolean;
 }
 
 export interface ConversationsResponse {
@@ -167,5 +168,25 @@ export async function deleteConversation(id: string): Promise<boolean> {
     } catch (error) {
         console.error('Failed to delete conversation:', error);
         return false;  // Network or backend error
+    }
+}
+
+// Chat persistence: Update pinned status of a conversation in the database
+export async function updateConversationPinned(id: string, pinned: boolean): Promise<boolean> {
+    try {
+        const response = await fetch(`${API_Base}/conversations/${id}/pinned`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ pinned }),
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return true;
+    } catch (error) {
+        console.error('Failed to update conversation pinned status:', error);
+        return false;
     }
 }

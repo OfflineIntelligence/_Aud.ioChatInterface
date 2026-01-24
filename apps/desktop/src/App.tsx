@@ -10,6 +10,8 @@ import { fetchConversations } from './api/chat'
 import { fetchConversation } from './api/chat'
 // Chat persistence: Delete conversations permanently from database
 import { deleteConversation } from './api/chat'
+// Chat persistence: Update pinned status in database
+import { updateConversationPinned } from './api/chat'
 import './App.css'
 
 function App() {
@@ -42,7 +44,7 @@ function App() {
         title: conv.title,
         messages: [],  // Messages loaded on demand when chat is selected
         createdAt: new Date(conv.created_at),
-        pinned: false,
+        pinned: conv.pinned,
       }));
       setChats(loadedChats);
     };
@@ -138,13 +140,33 @@ function App() {
     }
   };
 
-  // Toggle pin status for a chat
-  const handlePinChat = (chatId: string) => {
-    setChats(prev => prev.map(chat =>
-      chat.id === chatId
-        ? { ...chat, pinned: !(chat.pinned ?? false) } // Explicit handling of undefined pinned property
-        : chat
+  // Toggle pin status for a chat and persist to database
+  const handlePinChat = async (chatId: string) => {
+    // Get the current pinned state before optimistic update
+    const chat = chats.find(c => c.id === chatId);
+    if (!chat) return;
+    
+    // Explicit handling of undefined pinned property with ?? false
+    const newPinnedState = !(chat.pinned ?? false);
+    
+    // Optimistically update UI first
+    setChats(prev => prev.map(c =>
+      c.id === chatId
+        ? { ...c, pinned: newPinnedState }
+        : c
     ));
+    
+    // Persist to database
+    const success = await updateConversationPinned(chatId, newPinnedState);
+    if (!success) {
+      // Revert on failure
+      console.error('Failed to update pinned status in database');
+      setChats(prev => prev.map(c =>
+        c.id === chatId
+          ? { ...c, pinned: !newPinnedState }
+          : c
+      ));
+    }
   };
 
   // Delete a chat and reset to new chat if it was active
