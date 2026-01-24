@@ -141,28 +141,29 @@ function App() {
 
   // Toggle pin status for a chat and persist to database
   const handlePinChat = async (chatId: string) => {
+    // Get the current pinned state before optimistic update
+    const chat = chats.find(c => c.id === chatId);
+    if (!chat) return;
+    
+    const newPinnedState = !chat.pinned;
+    
     // Optimistically update UI first
-    setChats(prev => prev.map(chat =>
-      chat.id === chatId
-        ? { ...chat, pinned: !chat.pinned }
-        : chat
+    setChats(prev => prev.map(c =>
+      c.id === chatId
+        ? { ...c, pinned: newPinnedState }
+        : c
     ));
     
-    // Get the new pinned state
-    const chat = chats.find(c => c.id === chatId);
-    if (chat) {
-      const newPinnedState = !chat.pinned;
-      // Persist to database
-      const success = await updateConversationPinned(chatId, newPinnedState);
-      if (!success) {
-        // Revert on failure
-        console.error('Failed to update pinned status in database');
-        setChats(prev => prev.map(c =>
-          c.id === chatId
-            ? { ...c, pinned: !newPinnedState }
-            : c
-        ));
-      }
+    // Persist to database
+    const success = await updateConversationPinned(chatId, newPinnedState);
+    if (!success) {
+      // Revert on failure
+      console.error('Failed to update pinned status in database');
+      setChats(prev => prev.map(c =>
+        c.id === chatId
+          ? { ...c, pinned: !newPinnedState }
+          : c
+      ));
     }
   };
 
