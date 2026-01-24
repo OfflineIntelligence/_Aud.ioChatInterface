@@ -22,6 +22,8 @@ pub struct SessionMetadata {
     pub tags: Vec<String>,
     #[serde(default)]  // Handle old records missing this field
     pub user_defined: HashMap<String, String>,
+    #[serde(default)]  // Handle old records missing this field
+    pub pinned: bool,
 }
 
 /// Represents a single message in a conversation

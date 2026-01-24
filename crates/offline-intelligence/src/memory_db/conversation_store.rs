@@ -223,6 +223,36 @@ impl ConversationStore {
         }
     }
 
+    pub fn update_session_pinned(&self, session_id: &str, pinned: bool) -> anyhow::Result<()> {
+        let conn = self.get_conn()?;
+        
+        // Fetch current metadata
+        let mut stmt = conn.prepare("SELECT metadata FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query([session_id])?;
+        
+        if let Some(row) = rows.next()? {
+            let metadata_json: String = row.get(0)?;
+            let mut metadata: SessionMetadata = serde_json::from_str(&metadata_json)
+                .unwrap_or_default();
+            
+            // Update pinned status
+            metadata.pinned = pinned;
+            let updated_metadata_json = serde_json::to_string(&metadata)?;
+            
+            // Update session with new metadata and timestamp
+            let now = Utc::now();
+            conn.execute(
+                "UPDATE sessions SET metadata = ?1, last_accessed = ?2 WHERE id = ?3",
+                params![updated_metadata_json, now.to_rfc3339(), session_id],
+            )?;
+            
+            info!("Updated session {} pinned status to: {}", session_id, pinned);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Session {} not found", session_id))
+        }
+    }
+
     pub fn get_session(&self, session_id: &str) -> anyhow::Result<Option<Session>> {
         let conn = self.get_conn()?;
         let mut stmt = conn.prepare("SELECT id, created_at, last_accessed, metadata FROM sessions WHERE id = ?1")?;

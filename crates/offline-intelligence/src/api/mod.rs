@@ -11,4 +11,4 @@ pub mod conversation_api;  // Chat persistence: REST API for conversation CRUD o
 pub use memory_api::{memory_optimize, memory_stats, memory_cleanup};
 pub use title_api::{generate_title, GenerateTitleRequest, GenerateTitleResponse};
 // Chat persistence: Export conversation management handlers for REST routes (CRUD operations)
-pub use conversation_api::{get_conversations, get_conversation, update_conversation_title, delete_conversation};
+pub use conversation_api::{get_conversations, get_conversation, update_conversation_title, delete_conversation, update_conversation_pinned};
