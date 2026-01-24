@@ -170,16 +170,21 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
     let backend_target_clone = backend_target.clone();
     let initial_model_path = cfg.model_path.clone();
     
-    info!("🚀 Starting automatic model loading...");
-    match runner_clone.spawn_model(initial_model_path.clone()).await {
-        Ok(url) => {
-            info!("✅ Model loaded successfully: {}", initial_model_path);
-            backend_target_clone.set(url).await;
+    // FIXED: Spawn model loading in a background task using tokio::spawn() instead of awaiting it directly.
+    // This allows the HTTP server to start immediately on port 8000 while the model loads asynchronously.
+    // Previously, the server startup was blocked until model loading completed, causing "connection refused" errors.
+    tokio::spawn(async move {
+        info!("🚀 Starting automatic model loading in background...");
+        match runner_clone.spawn_model(initial_model_path.clone()).await {
+            Ok(url) => {
+                info!("✅ Model loaded successfully: {}", initial_model_path);
+                backend_target_clone.set(url).await;
+            }
+            Err(e) => {
+                error!("❌ Failed to load initial model: {}", e);
+            }
         }
-        Err(e) => {
-            error!("❌ Failed to load initial model: {}", e);
-        }
-    }
+    });
     
     let admin_state = admin::AdminState {
         cfg: cfg.clone(),

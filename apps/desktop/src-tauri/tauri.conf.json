@@ -14,7 +14,13 @@
             {
                 "title": "Offline Intelligence",
                 "width": 800,
-                "height": 600
+                "height": 600,
+                "transparent": false,
+                "decorations": true,
+                "resizable": true,
+                "fullscreen": false,
+                "hiddenTitle": false,
+                "titleBarStyle": "Visible"
             }
         ],
         "security": {
