@@ -239,11 +239,11 @@ impl ConversationStore {
             metadata.pinned = pinned;
             let updated_metadata_json = serde_json::to_string(&metadata)?;
             
-            // Update session with new metadata and timestamp
-            let now = Utc::now();
+            // Update session with new metadata only; pinning is a UI organization action
+            // and does not constitute accessing the conversation content, so don't update last_accessed
             conn.execute(
-                "UPDATE sessions SET metadata = ?1, last_accessed = ?2 WHERE id = ?3",
-                params![updated_metadata_json, now.to_rfc3339(), session_id],
+                "UPDATE sessions SET metadata = ?1 WHERE id = ?2",
+                params![updated_metadata_json, session_id],
             )?;
             
             info!("Updated session {} pinned status to: {}", session_id, pinned);
