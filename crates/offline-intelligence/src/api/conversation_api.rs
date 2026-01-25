@@ -170,15 +170,9 @@ pub async fn update_conversation_title(
                 })))
             }
             Err(e) => {
-                let error_msg = e.to_string();
-                // Check if the error is due to session not found
-                if error_msg.contains("not found") {
-                    error!("Conversation not found: {}", session_id);
-                    Err((StatusCode::NOT_FOUND, format!("Conversation not found: {}", session_id)).into_response())
-                } else {
-                    error!("Failed to update conversation title: {}", e);
-                    Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)).into_response())
-                }
+                // Standardize on 500 so the frontend handles all DB failures uniformly
+                error!("Failed to update conversation title for session {}: {}", session_id, e);
+                Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)).into_response())
             }
         }
     } else {

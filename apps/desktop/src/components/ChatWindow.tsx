@@ -28,14 +28,14 @@ interface ChatWindowProps {
     onSessionIdChange: (sessionId: string) => void;
     isPinned?: boolean;
     onMessagesUpdate: (messages: Message[]) => void;
-    onTitleGenerated?: (title: string) => void;
+    onTitleGenerated?: (title: string, sessionId: string) => void;
     onPinChat?: (chatId: string) => void;
     // Now returns Promise to support async database deletion with error handling
     onDeleteChat?: (chatId: string) => Promise<void>;
 }
 
-export const ChatWindow: React.FC<ChatWindowProps> = ({ 
-    messages, 
+export const ChatWindow: React.FC<ChatWindowProps> = ({
+    messages,
     chatTitle,
     chatId,
     sessionId,
@@ -46,34 +46,26 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     onPinChat,
     onDeleteChat
 }) => {
-    // Track if first prompt has been sent (for title generation)
     const firstPromptSent = useRef(false);
 
-    // Compact input bar state
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
-    
-    // Dropdown menu state
+
     const [isDropdownOpen, setIsDropdownOpen] = useState(false);
     const dropdownRef = useRef<HTMLDivElement>(null);
-    
-    // Delete confirmation modal state
+
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-    // Track deletion in progress to disable button and show loading state
     const [isDeleting, setIsDeleting] = useState(false);
 
-    // Title generation hook
     const { generateTitle } = useChatTitle();
 
-    // Reset title generation flag when new chat started
     useEffect(() => {
         if (!chatTitle) {
             firstPromptSent.current = false;
         }
     }, [chatTitle]);
 
-    // Close dropdown when clicking outside
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
             if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -98,7 +90,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     const handleSend = async () => {
         if (!input.trim() || isLoading) return;
 
-        // Generate unique session ID on first message (timestamp-based) for backend persistence
         let currentSessionId = sessionId;
         if (!currentSessionId) {
             currentSessionId = Date.now().toString();
@@ -113,30 +104,25 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         setInput('');
         setIsLoading(true);
 
-        // Generate title asynchronously in background (non-blocking)
         if (firstPrompt && !chatTitle) {
             firstPromptSent.current = true;
             generateTitle(firstPrompt).then(title => {
                 if (title) {
-                    // Persist generated title to database for cross-session recovery
-                    updateConversationTitle(currentSessionId, title).then(success => {
+                    updateConversationTitle(currentSessionId!, title).then(success => {
                         if (success) {
                             console.log('Title saved to database:', title);
                         }
                     }).catch(err => console.error('Failed to save title to database:', err));
-                    
-                    // Update UI
-                    onTitleGenerated?.(title);
+                    // Propagate title with session ID so sidebar/back end stay in sync
+                    onTitleGenerated?.(title, currentSessionId!);
                 }
             }).catch(err => console.error('Title generation failed:', err));
         }
 
         try {
-            // Placeholder assistant message to stream into
             onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: '' }]);
-
             let fullContent = '';
-            for await (const chunk of streamChat(newMessages, currentSessionId)) {
+            for await (const chunk of streamChat(newMessages, currentSessionId!)) {
                 fullContent += chunk;
                 const updated = [...newMessages, { role: 'assistant' as const, content: fullContent }];
                 onMessagesUpdate(updated);
@@ -154,24 +140,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         handleSend();
     };
 
-    // Download chat transcript as text file - works in both Tauri and browser
-    // State for managing custom save dialogs (needed for dev popup environment)
     const [showSaveDialog, setShowSaveDialog] = useState(false);
     const [showWebSaveDialog, setShowWebSaveDialog] = useState(false);
     const [pendingTranscript, setPendingTranscript] = useState<string>('');
     const [pendingDefaultName, setPendingDefaultName] = useState<string>('chat.txt');
 
     const handleSaveTranscript = async () => {
-        console.log('Save button clicked. Messages count:', messages.length);
-        
         if (messages.length === 0) {
-            console.warn('No messages to save');
             alert('No messages to save yet. Start a conversation first.');
             return;
         }
 
         try {
-            // Format messages for export
             let transcript = '';
             if (chatTitle) {
                 transcript += `Chat: ${chatTitle}\n`;
@@ -179,91 +159,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 transcript += '='.repeat(60) + '\n\n';
             }
 
-            // Process messages (skip system messages)
             const filteredMessages = messages.filter(m => m.role !== 'system');
-            console.log('Filtered messages count:', filteredMessages.length);
-            
             filteredMessages.forEach(msg => {
-                // Updated from "Offline Intelligence" to "Aud.io" branding
                 const sender = msg.role === 'user' ? 'User' : 'Aud.io';
                 transcript += `${sender}:\n`;
                 transcript += `${msg.content}\n\n`;
             });
 
-            console.log('Transcript generated, length:', transcript.length);
-
-            // Environment detection
-            const isTauri = '__TAURI__' in window;
-            const port = window.location.port;
-            const isDevPopup = port === '1420' && !isTauri; // Tauri dev opens a browser popup to the dev server
-
-            console.log('[SAVE DEBUG] hostname:', window.location.hostname);
-            console.log('[SAVE DEBUG] isTauri:', isTauri);
-            console.log('[SAVE DEBUG] protocol:', window.location.protocol);
-            console.log('[SAVE DEBUG] port:', port);
-
-            if (isTauri) {
-                // Tauri desktop (native window): use the OS file picker via Tauri dialog
-                console.log('[SAVE] Tauri desktop detected - using native save dialog');
-                try {
-                    const defaultFileName = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
-                    const filePath = await save({
-                        defaultPath: defaultFileName,
-                        filters: [{ name: 'Text', extensions: ['txt'] }]
-                    });
-
-                    if (filePath) {
-                        await writeTextFile(filePath, transcript);
-                        console.log('[SAVE] ✅ File saved via Tauri:', filePath);
-                    } else {
-                        console.log('[SAVE] Tauri dialog cancelled');
-                    }
-                } catch (tauriError) {
-                    console.error('[SAVE] ❌ Tauri save() error:', tauriError);
-                    alert('Failed to open save dialog. Please try again.');
-                }
-            } else if (isDevPopup) {
-                // Tauri dev popup in the browser: show confirmation modal before saving
-                console.log('[SAVE] Dev popup detected - showing web confirmation modal');
-                setPendingTranscript(transcript);
-                setPendingDefaultName(`${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`);
-                setShowWebSaveDialog(true);
-            } else {
-                // Regular browser (e.g., localhost:3000): show the native browser file picker directly
-                console.log('[SAVE] Browser detected - opening default save file picker');
-                const name = `${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`;
-                const anyWindow = window as any;
-                try {
-                    if (anyWindow.showSaveFilePicker) {
-                        const handle = await anyWindow.showSaveFilePicker({
-                            suggestedName: name,
-                            types: [{ description: 'Text', accept: { 'text/plain': ['.txt'] } }]
-                        });
-                        const writable = await handle.createWritable();
-                        await writable.write(transcript);
-                        await writable.close();
-                        console.log('[SAVE] ✅ Saved via browser picker');
-                    } else {
-                        // Fallback to simple download
-                        const blob = new Blob([transcript], { type: 'text/plain;charset=utf-8' });
-                        const link = document.createElement('a');
-                        link.href = URL.createObjectURL(blob);
-                        link.download = name;
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                        setTimeout(() => URL.revokeObjectURL(link.href), 100);
-                        console.log('[SAVE] Fallback browser download triggered');
-                    }
-                } catch (e) {
-                    if ((e as any)?.name === 'AbortError') {
-                        console.log('[SAVE] Browser picker cancelled');
-                    } else {
-                        console.error('[SAVE] ❌ Browser save failed:', e);
-                        alert('Failed to save the file.');
-                    }
-                }
-            }
+            setPendingTranscript(transcript);
+            setPendingDefaultName(`${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`);
+            // Route all environments through the web save dialog for consistent UX
+            setShowWebSaveDialog(true);
         } catch (error) {
             console.error('Error saving transcript:', error);
         }

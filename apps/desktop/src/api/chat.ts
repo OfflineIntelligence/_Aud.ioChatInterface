@@ -142,11 +142,15 @@ export async function updateConversationTitle(id: string, title: string): Promis
             body: JSON.stringify({ title }),
         });
         if (!response.ok) {
+            // Surface backend response body to help debug failed title updates
+            const errorData = await response.text();
+            console.error(`Failed to update conversation title [${id}]: HTTP ${response.status} - ${errorData}`);
             throw new Error(`HTTP error! status: ${response.status}`);
         }
+        console.log(`Title saved successfully for conversation [${id}]: "${title}"`);
         return true;
     } catch (error) {
-        console.error('Failed to update conversation title:', error);
+        console.error(`Failed to update conversation title [${id}]:`, error);
         return false;
     }
 }

@@ -66,27 +66,33 @@ function App() {
 
   // Create new chat entry when title generated from first prompt
   // Adds chat to history and sets as active for continued conversation
-  const handleTitleGenerated = (title: string) => {
+  // Receives sessionId explicitly to avoid state race conditions
+  const handleTitleGenerated = (title: string, sessionIdArg: string) => {
     setCurrentChatTitle(title);
     
-    // Use the sessionId that was generated when the first message was sent.
-    // Avoid generating a synthetic ID here to keep frontend and backend IDs in sync.
-    if (!currentSessionId) {
-      console.error('handleTitleGenerated called without a currentSessionId; cannot create chat entry.');
+    // Use the sessionId passed from ChatWindow to avoid React state timing issues
+    const chatId = sessionIdArg;
+    if (!chatId) {
+      console.error('handleTitleGenerated called without a sessionId; cannot create chat entry.');
       return;
     }
     
-    const chatId = currentSessionId;
-    
+    // Create chat with title - messages will be synced via useEffect below
     const newChat: Chat = {
       id: chatId,
       title,
-      messages: currentMessages,
+      messages: [], // Start empty, will be populated by the sync effect
       createdAt: new Date(),
-      pinned: false // Explicitly initialize pinned state
+      pinned: false
     };
     
-    setChats(prev => [newChat, ...prev]);
+    // Persist chat metadata immediately so the sidebar renders before messages sync
+    console.log('Adding new chat to sidebar:', newChat);
+    setChats(prev => {
+      const updated = [newChat, ...prev];
+      console.log('Chats state after adding:', updated);
+      return updated;
+    });
     setActiveChatId(chatId);
   };
 
