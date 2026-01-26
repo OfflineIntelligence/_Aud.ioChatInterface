@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn, debug};
 
 use crate::UnifiedAppState;
-use crate::memory_db::StoredMessage;
 
 /// Search request payload
 #[derive(Debug, Deserialize)]
@@ -52,7 +51,7 @@ pub async fn search(
         return Err((StatusCode::BAD_REQUEST, "Query cannot be empty".to_string()));
     }
     
-    let limit = payload.limit.unwrap_or(10).max(1).min(100) as usize;
+    let limit = payload.limit.unwrap_or(10).clamp(1, 100) as usize;
     
     // Extract keywords from query
     let keywords: Vec<String> = payload.query

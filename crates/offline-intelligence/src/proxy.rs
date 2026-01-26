@@ -3,11 +3,11 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{StatusCode, HeaderValue},
-    response::{IntoResponse, Response},
+    http::StatusCode,
+    response::Response,
     Json,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::time::Duration;
 use futures::{StreamExt, Stream};
 use tracing::{debug, error, info, warn};
@@ -59,7 +59,7 @@ struct ConversationCapturer<S> {
     inner: S,
     state: AppState,
     session_id: String,
-    original_context: Vec<Message>,
+    _original_context: Vec<Message>,
     accumulated_response: String,
 }
 
@@ -201,13 +201,13 @@ pub async fn generate_stream_endpoint(
     // 5. Wrap stream to capture response and save to DB
     let inner_stream = response
         .bytes_stream()
-        .map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+        .map(|result| result.map_err(std::io::Error::other));
 
     let captured_stream = ConversationCapturer {
         inner: inner_stream,
         state: state.clone(),
         session_id,
-        original_context: messages, // We save the original context + the new assistant reply
+        _original_context: messages, // We save the original context + the new assistant reply
         accumulated_response: String::new(),
     };
 

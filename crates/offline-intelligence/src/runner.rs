@@ -186,12 +186,14 @@ fn spawn_llama_backend(cfg: &Config, port: u16, model_path: String) -> Result<Ch
     Ok(child)
 }
 
+#[allow(dead_code)]
 fn is_oom(err: &anyhow::Error) -> bool {
     format!("{err:?}").contains("CUDA out of memory") ||
     format!("{err:?}").contains("OOM") ||
     format!("{err:?}").contains("out of memory")
 }
 
+#[allow(dead_code)]
 fn is_port_conflict(err: &anyhow::Error) -> bool {
     format!("{err:?}").contains("Address already in use") ||
     format!("{err:?}").contains("port") ||

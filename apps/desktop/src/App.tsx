@@ -73,7 +73,6 @@ function App() {
     // Use the sessionId passed from ChatWindow to avoid React state timing issues
     const chatId = sessionIdArg;
     if (!chatId) {
-      console.error('handleTitleGenerated called without a sessionId; cannot create chat entry.');
       return;
     }
     
@@ -87,11 +86,8 @@ function App() {
     };
     
     // Persist chat metadata immediately so the sidebar renders before messages sync
-    console.log('Adding new chat to sidebar:', newChat);
     setChats(prev => {
-      const updated = [newChat, ...prev];
-      console.log('Chats state after adding:', updated);
-      return updated;
+      return [newChat, ...prev];
     });
     setActiveChatId(chatId);
   };
@@ -165,8 +161,7 @@ function App() {
     // Persist to database
     const success = await updateConversationPinned(chatId, newPinnedState);
     if (!success) {
-      // Revert on failure
-      console.error('Failed to update pinned status in database');
+      // Revert UI if persistence fails
       setChats(prev => prev.map(c =>
         c.id === chatId
           ? { ...c, pinned: !newPinnedState }
@@ -178,10 +173,8 @@ function App() {
   // Delete a chat and reset to new chat if it was active
   // Now async to wait for database deletion before updating UI state
   const handleDeleteChat = async (chatId: string) => {
-    console.log('handleDeleteChat called for:', chatId);
     // Delete from database first; surface failure to caller so UI can show feedback
     const success = await deleteConversation(chatId);
-    console.log('deleteConversation returned:', success);
 
     if (!success) {
       // Throw error so ChatWindow can show user-facing alert

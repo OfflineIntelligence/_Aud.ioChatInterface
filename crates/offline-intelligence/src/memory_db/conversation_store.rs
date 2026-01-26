@@ -9,6 +9,16 @@ use std::sync::Arc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
+/// Parameters for storing a message
+pub struct MessageParams<'a> {
+    pub session_id: &'a str,
+    pub role: &'a str,
+    pub content: &'a str,
+    pub message_index: i32,
+    pub tokens: i32,
+    pub importance_score: f32,
+}
+
 /// Manages conversation storage and retrieval using a connection pool
 pub struct ConversationStore {
     pool: Arc<Pool<SqliteConnectionManager>>,
@@ -40,16 +50,11 @@ impl ConversationStore {
     /// Store a message using an external transaction
     pub fn store_message_with_tx(
         &self,
-        tx: &mut Connection, // Accepts a connection or transaction
-        session_id: &str,
-        role: &str,
-        content: &str,
-        message_index: i32,
-        tokens: i32,
-        importance_score: f32,
+        tx: &mut Connection,
+        params: MessageParams,
     ) -> anyhow::Result<StoredMessage> {
         // Update session access time
-        self.update_session_access_with_conn(tx, session_id)?;
+        self.update_session_access_with_conn(tx, params.session_id)?;
         
         let now = Utc::now();
         
@@ -58,13 +63,13 @@ impl ConversationStore {
              (session_id, message_index, role, content, tokens, timestamp, importance_score, embedding_generated)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                session_id,
-                message_index,
-                role,
-                content,
-                tokens,
+                params.session_id,
+                params.message_index,
+                params.role,
+                params.content,
+                params.tokens,
                 now.to_rfc3339(),
-                importance_score,
+                params.importance_score,
                 false,
             ],
         )?;
@@ -73,13 +78,13 @@ impl ConversationStore {
         
         Ok(StoredMessage {
             id,
-            session_id: session_id.to_string(),
-            message_index,
-            role: role.to_string(),
-            content: content.to_string(),
-            tokens,
+            session_id: params.session_id.to_string(),
+            message_index: params.message_index,
+            role: params.role.to_string(),
+            content: params.content.to_string(),
+            tokens: params.tokens,
             timestamp: now,
-            importance_score,
+            importance_score: params.importance_score,
             embedding_generated: false,
         })
     }
@@ -102,7 +107,7 @@ impl ConversationStore {
         
         let tx = conn.transaction()?;
         {
-            for (idx, (role, content, message_index, tokens, importance_score)) in messages.iter().enumerate() {
+            for (role, content, message_index, tokens, importance_score) in messages.iter() {
                 tx.execute(
                     "INSERT INTO messages 
                      (session_id, message_index, role, content, tokens, timestamp, importance_score, embedding_generated)
@@ -450,9 +455,9 @@ impl ConversationStore {
         }
         
         // Add keyword search
-        for i in 0..patterns.len() {
+        for pattern in &patterns {
             query.push_str(" AND LOWER(m.content) LIKE ?");
-            params.push(Box::new(patterns[i].clone())); // Clone the pattern
+            params.push(Box::new(pattern.clone())); // Clone the pattern
         }
         
         // Order by relevance (keyword matches + recency + importance)

@@ -80,7 +80,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }, [isDropdownOpen]);
 
     const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        if (messagesEndRef.current && typeof messagesEndRef.current.scrollIntoView === 'function') {
+            messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
     };
 
     useEffect(() => {
@@ -109,9 +111,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             generateTitle(firstPrompt).then(title => {
                 if (title) {
                     updateConversationTitle(currentSessionId!, title).then(success => {
-                        if (success) {
-                            console.log('Title saved to database:', title);
-                        }
+                        // Title persisted server-side for sidebar refresh
                     }).catch(err => console.error('Failed to save title to database:', err));
                     // Propagate title with session ID so sidebar/back end stay in sync
                     onTitleGenerated?.(title, currentSessionId!);
@@ -182,14 +182,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 defaultFileName={pendingDefaultName}
                 content={pendingTranscript}
                 onClose={() => setShowSaveDialog(false)}
-                onSaved={(p) => { setShowSaveDialog(false); console.log('[SAVE] Saved via custom picker at', p); }}
+                onSaved={() => { setShowSaveDialog(false); }}
             />
             <SaveTranscriptWebDialog
                 open={showWebSaveDialog}
                 defaultFileName={pendingDefaultName}
                 content={pendingTranscript}
                 onClose={() => setShowWebSaveDialog(false)}
-                onSaved={(info) => { setShowWebSaveDialog(false); console.log('[SAVE] Saved via web dialog:', info); }}
+                onSaved={() => { setShowWebSaveDialog(false); }}
             />
             {/* Header */}
             <header className="chat-header">
@@ -346,9 +346,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                             }
 
                                             setIsDeleting(true);
-                                            console.log('📤 Calling onDeleteChat...');
                                             await onDeleteChat(chatId);
-                                            console.log('✅ Chat deleted successfully');
                                             setShowDeleteConfirm(false);
                                             setIsDropdownOpen(false);
                                         } catch (error) {

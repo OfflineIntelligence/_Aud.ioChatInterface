@@ -10,7 +10,7 @@ use crate::context_engine::{
 };
 
 use std::sync::Arc;
-use tracing::{info, debug, error, warn};
+use tracing::{info, debug, warn};
 use tokio::sync::RwLock;
 
 /// Main orchestrator for the context engine
@@ -99,7 +99,7 @@ impl ContextOrchestrator {
         
         // Update current messages in Tier 1
         {
-            let mut tier_manager = self.tier_manager.write().await;
+            let tier_manager = self.tier_manager.write().await;
             tier_manager.store_tier1_content(session_id, messages).await;
         }
         
@@ -107,7 +107,7 @@ impl ContextOrchestrator {
         if let Some(last_message) = messages.last() {
             if last_message.role == "user" {
                 let tier_manager = self.tier_manager.read().await;
-                if let Err(e) = tier_manager.store_tier3_content(session_id, &[last_message.clone()]).await {
+                if let Err(e) = tier_manager.store_tier3_content(session_id, std::slice::from_ref(last_message)).await {
                     warn!("Failed to persist user query to database: {}", e);
                 } else {
                     info!("✅ Persisted user query to database for session {}", session_id);

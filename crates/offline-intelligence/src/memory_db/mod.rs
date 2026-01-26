@@ -174,7 +174,7 @@ impl MemoryDatabase {
         use blake3;
 
         let mut conn = self.pool.get()?;  // FIXED: Added mut
-        let mut tx = conn.transaction()?;
+        let tx = conn.transaction()?;
         
         // Calculate total size
         let total_size_bytes: usize = entries.iter()

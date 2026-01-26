@@ -1,17 +1,17 @@
 //! Main KV cache management engine
 
 use crate::memory::Message;
-use crate::memory_db::{MemoryDatabase, StoredMessage};
-use crate::cache_management::cache_config::{KVCacheConfig, RetrievalStrategy, SnapshotStrategy};
-use crate::cache_management::cache_extractor::{CacheExtractor, ExtractedCacheEntry, KVEntry, CacheEntryScorer as ExtractorScorer};
+use crate::memory_db::MemoryDatabase;
+use crate::cache_management::cache_config::{KVCacheConfig, SnapshotStrategy};
+use crate::cache_management::cache_extractor::{CacheExtractor, ExtractedCacheEntry, KVEntry};
 use crate::cache_management::cache_scorer::{CacheEntryScorer, CacheScoringConfig};
-use crate::cache_management::cache_bridge::{CacheContextBridge, TransitionType};
+use crate::cache_management::cache_bridge::CacheContextBridge;
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use tracing::{info, warn, debug, error};
+use tracing::{info, debug};
 use chrono::{Utc, DateTime};
-use serde::{Serialize, Deserialize};
+use serde::Serialize;
 
 /// Main KV cache management engine
 pub struct KVCacheManager {
@@ -45,7 +45,7 @@ pub struct SessionCacheState {
     pub metadata: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct CacheStatistics {
     pub total_clears: usize,
     pub total_retrievals: usize,
@@ -91,7 +91,7 @@ pub struct CacheClearResult {
     pub clear_reason: ClearReason,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RetrievalResult {
     pub retrieved_entries: Vec<RetrievedEntry>,
     pub bridge_message: Option<String>,
@@ -200,7 +200,7 @@ impl KVCacheManager {
             };
             
             // Release the mutable borrow before calling clear_cache
-            drop(session_state);
+            let _ = session_state;
             
             let clear_result = self.clear_cache(session_id, current_kv_entries, clear_reason).await?;
             result.should_clear_cache = true;
@@ -574,7 +574,7 @@ impl KVCacheManager {
         // Search messages by keywords
         let messages = self.database.conversations.search_messages_by_keywords(
             session_id,
-            &keywords,
+            keywords,
             20,
         ).await?;
         
@@ -757,7 +757,7 @@ impl KVCacheManager {
         let cutoff = Utc::now() - chrono::Duration::hours(24);
         let sessions_to_clean: Vec<String> = self.session_state.iter()
             .filter(|(_, state)| {
-                state.last_cleared_at.map_or(true, |dt| dt < cutoff)
+                state.last_cleared_at.is_none_or(|dt| dt < cutoff)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -833,17 +833,9 @@ impl KVCacheManager {
 
 impl CacheStatistics {
     pub fn new() -> Self {
-        Self {
-            total_clears: 0,
-            total_retrievals: 0,
-            entries_preserved: 0,
-            entries_cleared: 0,
-            entries_retrieved: 0,
-            last_operation: None,
-            operation_history: Vec::new(),
-        }
+        Self::default()
     }
-    
+
     pub fn record_clear(
         &mut self,
         total_entries: usize,
@@ -928,15 +920,9 @@ impl CacheStatistics {
 
 impl RetrievalResult {
     pub fn new() -> Self {
-        Self {
-            retrieved_entries: Vec::new(),
-            bridge_message: None,
-            search_duration_ms: 0,
-            keywords_used: Vec::new(),
-            tiers_searched: Vec::new(),
-        }
+        Self::default()
     }
-    
+
     pub fn total_entries(&self) -> usize {
         self.retrieved_entries.len()
     }

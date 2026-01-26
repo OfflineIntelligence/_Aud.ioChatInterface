@@ -25,7 +25,7 @@ pub use cache_management::*;
 
 use axum::{
     Router,
-    routing::{get, post, delete},
+    routing::{get, post, put, delete},
     extract::{State, FromRef, Path},  // Added FromRef here
     response::IntoResponse,
     Json,
@@ -34,7 +34,6 @@ use axum::http::Method;
 use std::{path::Path as StdPath, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tower::limit::ConcurrencyLimitLayer;
-use tower::ServiceBuilder;
 use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
@@ -44,14 +43,13 @@ use tracing::{info, warn, error};
 
 use context_engine::ContextOrchestrator;
 use memory_db::MemoryDatabase;
-use cache_management::KVCacheManager;
 
 #[derive(Clone)]
 pub struct UnifiedAppState {
     pub proxy: proxy::AppState,
     pub admin: admin::AdminState,
     pub context_orchestrator: Arc<RwLock<Option<ContextOrchestrator>>>,
-    pub cache_manager: Arc<RwLock<Option<Arc<KVCacheManager>>>>,
+    pub cache_manager: Arc<RwLock<Option<Arc<cache_management::KVCacheManager>>>>,
 }
 
 impl FromRef<UnifiedAppState> for proxy::AppState {
@@ -232,8 +230,8 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        // Allow DELETE method for conversation removal (fixes CORS blocking browser delete requests)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        // Allow DELETE method for conversation removal, PUT for title updates (fixes CORS blocking browser requests)
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers(Any);
 
     let app = Router::new()
@@ -242,7 +240,7 @@ pub async fn run_server(cfg: Config) -> anyhow::Result<()> {
         // Chat persistence: REST API routes for conversation management
         .route("/conversations", get(api::get_conversations))  // List all saved conversations
         .route("/conversations/:id", get(api::get_conversation))  // Get full conversation with messages
-        .route("/conversations/:id/title", post(api::update_conversation_title))  // Update conversation title
+        .route("/conversations/:id/title", put(api::update_conversation_title))  // Update conversation title
         .route("/conversations/:id/pinned", post(api::update_conversation_pinned))  // Update conversation pinned status
         .route("/conversations/:id", delete(api::delete_conversation))  // Delete conversation from database
         .route("/healthz", get(health_check))

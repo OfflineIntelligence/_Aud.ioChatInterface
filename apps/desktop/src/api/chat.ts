@@ -104,17 +104,22 @@ export async function* streamChat(messages: Message[], sessionId?: string): Asyn
 
 // Chat persistence: Fetch all saved conversations for sidebar display
 export async function fetchConversations(): Promise<ConversationSummary[]> {
-    try {
-        const response = await fetch(`${API_Base}/conversations`);
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        const data: ConversationsResponse = await response.json();
-        return data.conversations;
-    } catch (error) {
-        console.error('Failed to fetch conversations:', error);
-        return [];
+    const response = await fetch(`${API_Base}/conversations`);
+    if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
     }
+    const data: ConversationsResponse = await response.json();
+    return data.conversations;
+}
+
+// Test-friendly alias
+export async function getConversations(): Promise<ConversationSummary[]> {
+    const response = await fetch(`${API_Base}/conversations`);
+    if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data: ConversationsResponse = await response.json();
+    return data.conversations;
 }
 
 // Chat persistence: Load full conversation history from database when user clicks a chat
@@ -132,10 +137,10 @@ export async function fetchConversation(id: string): Promise<ConversationDetailR
 }
 
 // Chat persistence: Save auto-generated title to database after first message
-export async function updateConversationTitle(id: string, title: string): Promise<boolean> {
+export async function updateConversationTitle(id: string, title: string): Promise<{ id: string; title: string }> {
     try {
         const response = await fetch(`${API_Base}/conversations/${id}/title`, {
-            method: 'POST',
+            method: 'PUT',
             headers: {
                 'Content-Type': 'application/json',
             },
@@ -148,30 +153,47 @@ export async function updateConversationTitle(id: string, title: string): Promis
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         console.log(`Title saved successfully for conversation [${id}]: "${title}"`);
-        return true;
+        return { id, title };
     } catch (error) {
         console.error(`Failed to update conversation title [${id}]:`, error);
-        return false;
+        throw error;
     }
 }
 
-// Chat persistence: Delete a conversation permanently from the database
-// Returns boolean to indicate success; caller handles user-facing error messages
-export async function deleteConversation(id: string): Promise<boolean> {
+// Create new conversation
+export async function createNewConversation(): Promise<{ id: string; title: string }> {
     try {
-        const response = await fetch(`${API_Base}/conversations/${id}`, {
-            method: 'DELETE',
+        const response = await fetch(`${API_Base}/conversations`, {
+            method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
+            body: JSON.stringify({}),
         });
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
-        return true;  // Database deletion successful
+        const data = await response.json();
+        return data;
     } catch (error) {
-        console.error('Failed to delete conversation:', error);
-        return false;  // Network or backend error
+        console.error('Failed to create conversation:', error);
+        throw error;
+    }
+}
+
+// Delete conversation
+export async function deleteConversation(id: string): Promise<boolean> {
+    try {
+        const response = await fetch(`${API_Base}/conversations/${id}`, {
+            method: 'DELETE',
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return true;
+    } catch (error) {
+        console.error(`Failed to delete conversation [${id}]:`, error);
+        throw error;
     }
 }
 

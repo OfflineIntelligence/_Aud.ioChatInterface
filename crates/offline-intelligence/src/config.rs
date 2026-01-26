@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use tracing::{info, warn};
 use nvml_wrapper::Nvml;
 use sysinfo::System;
-use crate::resources::ResourceManager;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -257,9 +256,7 @@ impl Config {
             Some(4096)
         } else if path_lower.contains("2k") {
             Some(2048)
-        } else if path_lower.contains("7b") || path_lower.contains("8b") {
-            Some(4096)
-        } else if path_lower.contains("13b") {
+        } else if path_lower.contains("7b") || path_lower.contains("8b") || path_lower.contains("13b") {
             Some(4096)
         } else if path_lower.contains("34b") || path_lower.contains("70b") {
             Some(8192)
@@ -317,7 +314,7 @@ impl Config {
     }
 
     fn apply_batch_limits(batch_size: u32, ctx_size: u32, _has_gpu: bool) -> u32 {
-        let limited = batch_size.max(16).min(1024);
+        let limited = batch_size.clamp(16, 1024);
         match ctx_size {
             0..=2048 => limited.min(512),
             2049..=4096 => limited.min(384),
@@ -346,5 +343,401 @@ impl Config {
 
     pub fn api_addr(&self) -> SocketAddr {
         format!("{}:{}", self.api_host, self.api_port).parse().unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+
+    /// Helper function to create a test Config with default values
+    fn create_test_config() -> Config {
+        Config {
+            model_path: "/test/model.gguf".to_string(),
+            llama_bin: "/test/llama-server".to_string(),
+            llama_host: "127.0.0.1".to_string(),
+            llama_port: 8001,
+            ctx_size: 8192,
+            batch_size: 128,
+            threads: 6,
+            gpu_layers: 20,
+            health_timeout_seconds: 600,
+            hot_swap_grace_seconds: 25,
+            max_concurrent_streams: 2,
+            prometheus_port: 9000,
+            api_host: "127.0.0.1".to_string(),
+            api_port: 8000,
+            requests_per_second: 24,
+            generate_timeout_seconds: 300,
+            stream_timeout_seconds: 600,
+            health_check_timeout_seconds: 900,
+            queue_size: 1000,
+            queue_timeout_seconds: 300,
+            backend_url: "http://127.0.0.1:8001".to_string(),
+        }
+    }
+
+    // ===== Configuration Structure Tests =====
+
+    #[test]
+    fn test_config_creation_with_default_values() {
+        let config = create_test_config();
+        
+        assert_eq!(config.model_path, "/test/model.gguf");
+        assert_eq!(config.llama_bin, "/test/llama-server");
+        assert_eq!(config.api_port, 8000);
+        assert_eq!(config.llama_port, 8001);
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config1 = create_test_config();
+        let config2 = config1.clone();
+        
+        assert_eq!(config1.api_host, config2.api_host);
+        assert_eq!(config1.threads, config2.threads);
+        assert_eq!(config1.gpu_layers, config2.gpu_layers);
+    }
+
+    // ===== API Address Tests =====
+
+    #[test]
+    fn test_api_addr_parsing() {
+        let config = create_test_config();
+        let addr = config.api_addr();
+        
+        assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        assert_eq!(addr.port(), 8000);
+    }
+
+    #[test]
+    fn test_api_addr_with_different_ports() {
+        let mut config = create_test_config();
+        config.api_port = 3000;
+        
+        let addr = config.api_addr();
+        assert_eq!(addr.port(), 3000);
+    }
+
+    #[test]
+    fn test_api_addr_with_zero_address() {
+        let mut config = create_test_config();
+        config.api_host = "0.0.0.0".to_string();
+        config.api_port = 5000;
+        
+        let addr = config.api_addr();
+        assert_eq!(addr.port(), 5000);
+        // 0.0.0.0 represents all interfaces
+        assert_eq!(addr.ip().to_string(), "0.0.0.0");
+    }
+
+    // ===== Timeout Tests =====
+
+    #[test]
+    fn test_config_timeouts_are_positive() {
+        let config = create_test_config();
+        
+        assert!(config.health_timeout_seconds > 0);
+        assert!(config.generate_timeout_seconds > 0);
+        assert!(config.stream_timeout_seconds > 0);
+        assert!(config.health_check_timeout_seconds > 0);
+    }
+
+    #[test]
+    fn test_health_check_timeout_greater_than_health_timeout() {
+        let config = create_test_config();
+        
+        // Health check timeout should typically be longer than regular health timeout
+        assert!(config.health_check_timeout_seconds >= config.health_timeout_seconds);
+    }
+
+    // ===== Resource Limits Tests =====
+
+    #[test]
+    fn test_max_concurrent_streams_is_positive() {
+        let config = create_test_config();
+        assert!(config.max_concurrent_streams > 0);
+    }
+
+    #[test]
+    fn test_requests_per_second_is_reasonable() {
+        let config = create_test_config();
+        
+        // Should be a reasonable number (not 0, not extremely high)
+        assert!(config.requests_per_second > 0);
+        assert!(config.requests_per_second <= 1000);
+    }
+
+    #[test]
+    fn test_queue_size_is_positive() {
+        let config = create_test_config();
+        assert!(config.queue_size > 0);
+    }
+
+    // ===== Context and Batch Size Tests =====
+
+    #[test]
+    fn test_context_size_within_valid_range() {
+        let config = create_test_config();
+        
+        // Context size should be between 512 and 32768
+        assert!(config.ctx_size >= 512);
+        assert!(config.ctx_size <= 32768);
+    }
+
+    #[test]
+    fn test_batch_size_valid_range() {
+        let config = create_test_config();
+        
+        // Batch size should be between 16 and 1024
+        assert!(config.batch_size >= 16);
+        assert!(config.batch_size <= 1024);
+    }
+
+    #[test]
+    fn test_batch_size_reasonable_vs_context() {
+        let config = create_test_config();
+        
+        // Batch size should typically be less than context size
+        assert!(config.batch_size < config.ctx_size);
+    }
+
+    // ===== Thread Configuration Tests =====
+
+    #[test]
+    fn test_threads_is_positive() {
+        let config = create_test_config();
+        assert!(config.threads > 0);
+    }
+
+    #[test]
+    fn test_threads_within_reasonable_range() {
+        let config = create_test_config();
+        
+        // Should not exceed typical CPU thread count significantly
+        assert!(config.threads <= 256);
+    }
+
+    // ===== GPU Configuration Tests =====
+
+    #[test]
+    fn test_gpu_layers_non_negative() {
+        let config = create_test_config();
+        assert!(config.gpu_layers <= config.ctx_size);
+    }
+
+    #[test]
+    fn test_gpu_layers_within_range() {
+        let config = create_test_config();
+        
+        // GPU layers should typically be 0-50
+        assert!(config.gpu_layers <= 100);
+    }
+
+    // ===== Port Configuration Tests =====
+
+    #[test]
+    fn test_api_port_valid() {
+        let config = create_test_config();
+        assert!(config.api_port > 0);
+        assert!(config.api_port != config.llama_port);
+    }
+
+    #[test]
+    fn test_llama_port_valid() {
+        let config = create_test_config();
+        assert!(config.llama_port > 0);
+    }
+
+    #[test]
+    fn test_prometheus_port_valid() {
+        let config = create_test_config();
+        assert!(config.prometheus_port > 0);
+    }
+
+    #[test]
+    fn test_ports_are_different() {
+        let config = create_test_config();
+        
+        // Ports should be unique to avoid conflicts
+        assert_ne!(config.api_port, config.llama_port);
+        assert_ne!(config.api_port, config.prometheus_port);
+        assert_ne!(config.llama_port, config.prometheus_port);
+    }
+
+    // ===== Path Configuration Tests =====
+
+    #[test]
+    fn test_model_path_not_empty() {
+        let config = create_test_config();
+        assert!(!config.model_path.is_empty());
+    }
+
+    #[test]
+    fn test_llama_bin_not_empty() {
+        let config = create_test_config();
+        assert!(!config.llama_bin.is_empty());
+    }
+
+    #[test]
+    fn test_backend_url_not_empty() {
+        let config = create_test_config();
+        assert!(!config.backend_url.is_empty());
+    }
+
+    #[test]
+    fn test_backend_url_format() {
+        let config = create_test_config();
+        
+        // Should be a valid URL format
+        assert!(config.backend_url.starts_with("http://") || config.backend_url.starts_with("https://"));
+    }
+
+    // ===== Host Configuration Tests =====
+
+    #[test]
+    fn test_api_host_not_empty() {
+        let config = create_test_config();
+        assert!(!config.api_host.is_empty());
+    }
+
+    #[test]
+    fn test_llama_host_not_empty() {
+        let config = create_test_config();
+        assert!(!config.llama_host.is_empty());
+    }
+
+    // ===== Grace Period Tests =====
+
+    #[test]
+    fn test_hot_swap_grace_positive() {
+        let config = create_test_config();
+        assert!(config.hot_swap_grace_seconds > 0);
+    }
+
+    #[test]
+    fn test_hot_swap_grace_reasonable() {
+        let config = create_test_config();
+        
+        // Grace period should be less than 5 minutes
+        assert!(config.hot_swap_grace_seconds < 300);
+    }
+
+    // ===== Auto-detect Helper Tests =====
+
+    #[test]
+    fn test_auto_detect_threads_returns_positive() {
+        let threads = Config::auto_detect_threads();
+        assert!(threads > 0);
+    }
+
+    #[test]
+    fn test_auto_detect_gpu_layers_non_negative() {
+        let layers = Config::auto_detect_gpu_layers();
+        assert!(layers <= 512);
+    }
+
+    #[test]
+    fn test_apply_batch_limits_small_context() {
+        // For context < 2048, batch should be limited to 512
+        let batch = Config::apply_batch_limits(1024, 1024, false);
+        assert!(batch <= 512);
+    }
+
+    #[test]
+    fn test_apply_batch_limits_medium_context() {
+        // For context 2048-4096, batch should be limited to 384
+        let batch = Config::apply_batch_limits(1024, 3000, false);
+        assert!(batch <= 384);
+    }
+
+    #[test]
+    fn test_apply_batch_limits_large_context() {
+        // For context 16384-32768, batch should be limited to 64
+        let batch = Config::apply_batch_limits(1024, 24576, false);
+        assert!(batch <= 64);
+    }
+
+    #[test]
+    fn test_apply_batch_limits_minimum() {
+        // Batch size should always be at least 16
+        let batch = Config::apply_batch_limits(1, 8192, false);
+        assert!(batch >= 16);
+    }
+
+    #[test]
+    fn test_estimate_memory_per_batch_cpu() {
+        let memory_cpu = Config::estimate_memory_per_batch(8192, false);
+        assert!(memory_cpu > 0.0);
+    }
+
+    #[test]
+    fn test_estimate_memory_per_batch_gpu() {
+        let memory_gpu = Config::estimate_memory_per_batch(8192, true);
+        assert!(memory_gpu > 0.0);
+    }
+
+    #[test]
+    fn test_estimate_memory_gpu_less_than_cpu() {
+        let memory_cpu = Config::estimate_memory_per_batch(8192, false);
+        let memory_gpu = Config::estimate_memory_per_batch(8192, true);
+        
+        // GPU memory estimate should be less than CPU
+        assert!(memory_gpu < memory_cpu);
+    }
+
+    // ===== Queue Configuration Tests =====
+
+    #[test]
+    fn test_queue_timeout_is_positive() {
+        let config = create_test_config();
+        assert!(config.queue_timeout_seconds > 0);
+    }
+
+    #[test]
+    fn test_queue_timeout_less_than_generate_timeout() {
+        let config = create_test_config();
+        
+        // Queue timeout should be less than or equal to generate timeout
+        assert!(config.queue_timeout_seconds <= config.generate_timeout_seconds);
+    }
+
+    // ===== Integration Tests =====
+
+    #[test]
+    fn test_config_values_consistency() {
+        let config = create_test_config();
+        
+        // Verify all timeout values are reasonable
+        assert!(config.health_timeout_seconds <= 3600); // Max 1 hour
+        assert!(config.generate_timeout_seconds <= 1800); // Max 30 mins
+        assert!(config.stream_timeout_seconds <= 3600); // Max 1 hour
+        assert!(config.health_check_timeout_seconds <= 3600); // Max 1 hour
+    }
+
+    #[test]
+    fn test_config_backend_url_consistency() {
+        let config = create_test_config();
+        
+        // Backend URL should contain the llama host and port
+        assert!(config.backend_url.contains(&config.llama_host) || 
+                config.backend_url.contains("127.0.0.1") || 
+                config.backend_url.contains("localhost"));
+    }
+
+    #[test]
+    fn test_config_all_fields_initialized() {
+        let config = create_test_config();
+        
+        // Ensure all critical fields have valid values
+        assert!(!config.model_path.is_empty());
+        assert!(!config.llama_bin.is_empty());
+        assert!(!config.api_host.is_empty());
+        assert!(!config.llama_host.is_empty());
+        assert!(config.threads > 0);
+        assert!(config.gpu_layers <= config.ctx_size);
+        assert!(config.api_port > 0);
+        assert!(config.llama_port > 0);
     }
 }

@@ -7,11 +7,10 @@ use axum::{
 };
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tracing::{info, error};
 
 use crate::UnifiedAppState;
-use crate::memory_db::schema::{Session, StoredMessage};
 
 /// Response for fetching all conversations
 #[derive(Debug, Serialize)]

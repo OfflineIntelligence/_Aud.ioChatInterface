@@ -5,7 +5,7 @@ use crate::memory_db::{MemoryDatabase, StoredMessage, Summary as DbSummary, Sess
 use moka::sync::Cache;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Configuration for tier management
 #[derive(Debug, Clone)]
