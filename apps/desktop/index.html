@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="./vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aud.io Chat Interface</title>
+    <script>
+      // Critical early error logging - BEFORE anything else
+      window.onerror = function(msg, src, line, col, error) {
+        console.error('[FATAL] Window error:', msg, 'at', src + ':' + line);
+        var errDiv = document.createElement('div');
+        errDiv.style = 'color:red;padding:20px;background:#1a1a2e;min-height:100vh;font-family:monospace;';
+        errDiv.innerHTML = '<h1>Startup Error</h1><pre style="white-space:pre-wrap;">' + msg + '\n\n' + (error?.stack || 'No stack trace') + '</pre>';
+        document.body.innerHTML = '';
+        document.body.appendChild(errDiv);
+        return true;
+      };
+      window.onunhandledrejection = function(e) {
+        console.error('[FATAL] Unhandled promise rejection:', e.reason);
+      };
+      console.log('[index.html] Starting...');
+      
+      // Set backend port BEFORE any JS runs
+      window.BACKEND_PORT_OVERRIDE = 9999;
+      console.log('[HTML] Backend port set to:', window.BACKEND_PORT_OVERRIDE);
+    </script>
+    <script src="./port-config.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
+    <style>
+      html, body, #root {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: #1a1a2e;
+      }
+      .init-loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        color: #fff;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      .init-loading-content {
+        text-align: center;
+      }
+      .init-loading-text {
+        color: rgba(255,255,255,0.8);
+      }
+      .init-spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid rgba(255,255,255,0.1);
+        border-top-color: #00d4aa;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin: 0 auto 1rem;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="init-loading">
+        <div class="init-loading-content">
+          <div class="init-spinner"></div>
+          <span class="init-loading-text">Loading Aud.io...</span>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

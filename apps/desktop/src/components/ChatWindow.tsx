@@ -1,0 +1,1410 @@
+import React, { useState, useRef, useEffect } from 'react';
+import type { Message, ChatAttachment } from '../api/chat';
+import { streamChat, streamChatOpenRouter, updateConversationTitle } from '../api/chat';
+import { getApiBaseSync } from '../api/backendUrl';
+import { useChatTitle } from '../hooks/useChatTitle';
+import { useAuth } from '../contexts/AuthContext';
+import { SaveTranscriptDialog } from './SaveTranscriptDialog';
+import { SaveTranscriptWebDialog } from './SaveTranscriptWebDialog';
+import MessageContent from './MessageContent';
+import { ModelPromptBanner } from './ModelPromptBanner';
+import { ErrorNavigationBox } from './ErrorNavigationBox';
+import { showOpenRouterApiKeyModal } from './ModelsPanel';
+
+export interface Chat {
+    id: string;
+    title: string;
+    messages: Message[];
+    createdAt: Date;
+    pinned?: boolean;
+    saved?: boolean;
+}
+
+// Types for API responses used in model/file fetching
+interface ModelApiEntry {
+    id: string;
+    name: string;
+    status?: string;
+    download_source?: string;
+}
+
+interface SimpleModel {
+    id: string;
+    name: string;
+}
+
+interface LocalFileEntry {
+    id: number;
+    name: string;
+    path: string;
+    is_directory: boolean;
+    isDirectory?: boolean;
+}
+
+interface ChatWindowProps {
+    messages: Message[];
+    chatTitle: string | null;
+    chatId: string | null;
+    sessionId: string | null;
+    onSessionIdChange: (sessionId: string) => void;
+    isPinned?: boolean;
+    onMessagesUpdate: (messages: Message[]) => void;
+    onTitleGenerated?: (title: string, sessionId: string) => void;
+    onPinChat?: (chatId: string) => void;
+    onDeleteChat?: (chatId: string) => Promise<void>;
+    onQuestionAsked: () => void;
+    isOnlineMode?: boolean;
+    onToggleOnlineMode?: (mode: boolean) => void;
+    selectedModel?: { id: string; name: string; source: 'local' | 'openrouter' } | null;
+    openRouterApiKey?: string;
+    onOpenRouterApiKeyChange?: (key: string) => void;
+    onSelectedModelChange?: (model: { id: string; name: string; source: 'local' | 'openrouter' } | null) => void;
+    onOpenModels?: (focusApiKey?: boolean, focusHfToken?: boolean) => void;
+}
+
+export const ChatWindow: React.FC<ChatWindowProps> = ({
+    messages,
+    chatTitle,
+    chatId,
+    sessionId,
+    onSessionIdChange,
+    isPinned = false,
+    onMessagesUpdate,
+    onTitleGenerated,
+    onPinChat,
+    onDeleteChat,
+    onQuestionAsked,
+    isOnlineMode = false,
+    onToggleOnlineMode,
+    selectedModel,
+    openRouterApiKey,
+    onOpenRouterApiKeyChange,
+    onSelectedModelChange,
+    onOpenModels,
+}) => {
+    const firstPromptSent = useRef(false);
+    const [input, setInput] = useState('');
+    const [isLoading, setIsLoading] = useState(false);
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+    const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+    const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
+    const [openRouterModels, setOpenRouterModels] = useState<Array<{ id: string; name: string }>>([]);
+    const [localModels, setLocalModels] = useState<Array<{ id: string; name: string }>>([]);
+    const dropdownRef = useRef<HTMLDivElement>(null);
+    const modelDropdownRef = useRef<HTMLDivElement>(null);
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const selectedFilesRef = useRef<FileList | null>(null);
+    const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+    const [localFileAttachments, setLocalFileAttachments] = useState<ChatAttachment[]>([]);
+    const [removingFiles, setRemovingFiles] = useState<Set<string>>(new Set());
+    const { generateTitle } = useChatTitle();
+    const { setApiKey } = useAuth();
+
+
+
+    // Backend readiness state
+    const [backendReady, setBackendReady] = useState(false);
+    
+    // @filename autocomplete state — sourced exclusively from curated files
+    const [localFiles, setLocalFiles] = useState<Array<{ id: number; name: string; path: string; is_directory: boolean }>>([]);
+    const [showFileAutocomplete, setShowFileAutocomplete] = useState(false);
+    const [fileAutocompleteQuery, setFileAutocompleteQuery] = useState('');
+    const [fileAutocompleteIndex, setFileAutocompleteIndex] = useState(0);
+    const inputRef = useRef<HTMLInputElement>(null);
+    const fileAutocompleteRef = useRef<HTMLDivElement>(null);
+    // Show curated files picker panel (separate from @autocomplete)
+    const [showCuratedPicker, setShowCuratedPicker] = useState(false);
+    const [curatedPickerFiles, setCuratedPickerFiles] = useState<Array<{ id: number; name: string; path: string; is_directory: boolean }>>([]);
+    const [curatedPickerQuery, setCuratedPickerQuery] = useState('');
+    const curatedPickerRef = useRef<HTMLDivElement>(null);
+    
+    // Ensure we're using the most current API key from localStorage
+    useEffect(() => {
+        if (!openRouterApiKey && localStorage.getItem('aud-io-openrouter-key')) {
+            const storedKey = localStorage.getItem('aud-io-openrouter-key');
+            if (storedKey) {
+                onOpenRouterApiKeyChange?.(storedKey);
+            }
+        }
+    }, [openRouterApiKey, onOpenRouterApiKeyChange]);
+
+    const hasMessages = messages.filter(m => m.role !== 'system').length > 0;
+
+    // Check backend readiness with retry logic
+    useEffect(() => {
+        let cancelled = false;
+        let timeoutId: ReturnType<typeof setTimeout>;
+
+        const checkBackendReadiness = async (attempt: number) => {
+            if (cancelled) return;
+            try {
+                const response = await fetch(`${getApiBaseSync()}/healthz`);
+                if (cancelled) return;
+                if (response.ok) {
+                    // Enhanced health check: Accept both "ready" and "degraded" states
+                    try {
+                        const healthData = await response.json();
+                        // healthData = { status: "ready" | "initializing" | "degraded", runtime_ready: boolean, message?: string }
+
+                        // For OLLAMA-style behavior: Accept "degraded" (no model) as backend ready
+                        // User can download/activate models through UI
+                        if (healthData.status === 'ready' || healthData.status === 'degraded') {
+                            setBackendReady(true);
+                            console.log('Backend ready:', healthData.status, healthData.runtime_ready ? '(model loaded)' : '(no model loaded yet)');
+                        } else if (healthData.status === 'initializing') {
+                            console.log('Backend still initializing...');
+                            setBackendReady(false);
+                            // Retry after delay
+                            const delay = Math.min(10000, 500 * Math.pow(2, attempt + 1));
+                            timeoutId = setTimeout(() => checkBackendReadiness(attempt + 1), delay);
+                        } else {
+                            // Unknown status - retry
+                            setBackendReady(false);
+                            const delay = Math.min(10000, 500 * Math.pow(2, attempt + 1));
+                            timeoutId = setTimeout(() => checkBackendReadiness(attempt + 1), delay);
+                        }
+                    } catch (parseError) {
+                        // Fallback if JSON parsing fails (backward compatibility)
+                        console.warn('Health check response format unexpected, assuming ready');
+                        setBackendReady(true);
+                    }
+                } else {
+                    throw new Error(`Backend health check failed with status: ${response.status}`);
+                }
+            } catch {
+                if (cancelled) return;
+                console.warn('Backend not ready yet, attempt:', attempt + 1);
+                setBackendReady(false);
+
+                // Exponential backoff: retry after progressively longer delays (max 10s)
+                const delay = Math.min(10000, 500 * Math.pow(2, attempt + 1));
+                timeoutId = setTimeout(() => checkBackendReadiness(attempt + 1), delay);
+            }
+        };
+
+        checkBackendReadiness(0);
+        return () => {
+            cancelled = true;
+            clearTimeout(timeoutId);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!chatTitle) firstPromptSent.current = false;
+    }, [chatTitle]);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+                setIsDropdownOpen(false);
+            }
+            if (modelDropdownRef.current && !modelDropdownRef.current.contains(event.target as Node)) {
+                setIsModelDropdownOpen(false);
+            }
+        };
+        if (isDropdownOpen || isModelDropdownOpen) {
+            document.addEventListener('mousedown', handleClickOutside);
+            return () => document.removeEventListener('mousedown', handleClickOutside);
+        }
+    }, [isDropdownOpen, isModelDropdownOpen]);
+
+    // Fetch all models from the model management system (pure async - no retries)
+    useEffect(() => {
+        const fetchAllModels = async () => {
+            try {
+                // Fetch models and active model in parallel for better performance
+                const [modelsResponse, activeResponse] = await Promise.all([
+                    fetch(`${getApiBaseSync()}/models`),
+                    fetch(`${getApiBaseSync()}/models/active`).catch(() => null)
+                ]);
+
+                if (!modelsResponse.ok) {
+                    console.warn('Failed to fetch models from backend (HTTP', modelsResponse.status, ')');
+                    return;
+                }
+
+                const models = await modelsResponse.json();
+
+                // Separate OpenRouter models for the dropdown
+                const orModels = models.filter((model: ModelApiEntry) =>
+                    model.download_source === 'openrouter'
+                );
+
+                // Separate local models for potential use
+                const locModels = models.filter((model: ModelApiEntry) =>
+                    model.status === 'Installed' && model.download_source !== 'openrouter'
+                );
+
+                // Update OpenRouter models for the dropdown
+                setOpenRouterModels(orModels.map((model: ModelApiEntry) => ({
+                    id: model.id.replace('openrouter:', ''),
+                    name: model.name
+                })));
+
+                // Update local models for the dropdown, and also detect active running model
+                let localModelsList: SimpleModel[] = locModels.map((model: ModelApiEntry) => ({
+                    id: model.id,
+                    name: model.name
+                }));
+
+                // Check active model from parallel fetch (parse once, reuse below)
+                let activeModelData: { status?: string; model_name?: string } | null = null;
+                if (activeResponse?.ok) {
+                    activeModelData = await activeResponse.json().catch(() => null);
+                    if (activeModelData?.status === 'loaded' && activeModelData?.model_name) {
+                        const activeId = `active:${activeModelData.model_name}`;
+                        // Add active model to list if not already present
+                        if (!localModelsList.some((m: SimpleModel) => m.name === activeModelData!.model_name)) {
+                            localModelsList = [{ id: activeId, name: `${activeModelData.model_name} (running)` }, ...localModelsList];
+                        }
+                    }
+                }
+
+                setLocalModels(localModelsList);
+
+                // Validate currently selected model still exists in available list
+                if (selectedModel) {
+                    const allAvailableIds = [
+                        ...orModels.map((m: ModelApiEntry) => m.id.replace('openrouter:', '')),
+                        ...localModelsList.map((m: SimpleModel) => m.id),
+                    ];
+                    if (!allAvailableIds.includes(selectedModel.id)) {
+                        console.warn(`Selected model "${selectedModel.id}" no longer available`);
+                        // Don't auto-switch - let user choose
+                        onSelectedModelChange?.(null);
+                    }
+                }
+
+                // If no selected model is set for offline mode, try to detect the active running model
+                if (!selectedModel && !isOnlineMode) {
+                    if (locModels.length > 0) {
+                        // Use first installed local model from registry
+                        onSelectedModelChange?.({
+                            id: locModels[0].id,
+                            name: locModels[0].name,
+                            source: 'local' as const
+                        });
+                    } else if (activeModelData?.status === 'loaded' && activeModelData?.model_name) {
+                        // Use active model from already-parsed response
+                        onSelectedModelChange?.({
+                            id: `active:${activeModelData.model_name}`,
+                            name: activeModelData.model_name,
+                            source: 'local' as const
+                        });
+                        setLocalModels([{ id: `active:${activeModelData.model_name}`, name: activeModelData.model_name }]);
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to fetch models:', error);
+            }
+        };
+
+        fetchAllModels();
+    }, [isOnlineMode, selectedModel, onSelectedModelChange]);
+
+    const scrollToBottom = () => {
+        if (messagesEndRef.current && typeof messagesEndRef.current.scrollIntoView === 'function') {
+            messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+    };
+
+    useEffect(() => { scrollToBottom(); }, [messages]);
+
+    // Fetch all_files for @filename autocomplete and curated picker
+    // Uses /all-files/all — user-managed RAG files for context inclusion
+    const fetchCuratedFiles = React.useCallback(async () => {
+        try {
+            const allFilesResponse = await fetch(`${getApiBaseSync()}/all-files/all`);
+            
+            if (allFilesResponse.ok) {
+                const allFilesData = await allFilesResponse.json();
+                const allFiles = Array.isArray(allFilesData) ? allFilesData : [];
+                // Filter out directories - only show files
+                const filesOnly = allFiles.filter((f: LocalFileEntry) => !f.isDirectory && !f.is_directory).map((f: any) => {
+                    f.source = 'all_files';
+                    return f;
+                });
+                setLocalFiles(filesOnly);
+                // Also populate curated picker files
+                setCuratedPickerFiles(filesOnly);
+            }
+        } catch (error) {
+            console.error('Failed to fetch files:', error);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!backendReady) return;
+        fetchCuratedFiles();
+    }, [backendReady, fetchCuratedFiles]);
+
+    // Handle click outside for file autocomplete dropdown
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (fileAutocompleteRef.current && !fileAutocompleteRef.current.contains(event.target as Node) &&
+                inputRef.current && !inputRef.current.contains(event.target as Node)) {
+                setShowFileAutocomplete(false);
+            }
+        };
+        if (showFileAutocomplete) {
+            document.addEventListener('mousedown', handleClickOutside);
+            return () => document.removeEventListener('mousedown', handleClickOutside);
+        }
+    }, [showFileAutocomplete]);
+
+    // Handle click outside for curated files picker panel
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (curatedPickerRef.current && !curatedPickerRef.current.contains(event.target as Node)) {
+                setShowCuratedPicker(false);
+            }
+        };
+        if (showCuratedPicker) {
+            document.addEventListener('mousedown', handleClickOutside);
+            return () => document.removeEventListener('mousedown', handleClickOutside);
+        }
+    }, [showCuratedPicker]);
+
+    // Get filtered files for autocomplete
+    const filteredLocalFiles = localFiles.filter(f => 
+        f.name.toLowerCase().includes(fileAutocompleteQuery.toLowerCase())
+    ).slice(0, 8);
+
+    // Handle input change with @ detection
+    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const value = e.target.value;
+        setInput(value);
+        
+        // Detect @filename pattern
+        const cursorPos = e.target.selectionStart || value.length;
+        const textBeforeCursor = value.slice(0, cursorPos);
+        const atMatch = textBeforeCursor.match(/@(\S*)$/);
+        
+        if (atMatch) {
+            setFileAutocompleteQuery(atMatch[1]);
+            setShowFileAutocomplete(true);
+            setFileAutocompleteIndex(0);
+        } else {
+            setShowFileAutocomplete(false);
+        }
+    };
+
+    // Handle keyboard navigation in autocomplete
+    const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (showFileAutocomplete && filteredLocalFiles.length > 0) {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setFileAutocompleteIndex(prev => Math.min(prev + 1, filteredLocalFiles.length - 1));
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setFileAutocompleteIndex(prev => Math.max(prev - 1, 0));
+            } else if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                insertFileAsAttachment(filteredLocalFiles[fileAutocompleteIndex]);
+            } else if (e.key === 'Escape') {
+                setShowFileAutocomplete(false);
+            }
+        } else if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleSend();
+        }
+    };
+
+    // Insert file as attachment (from @autocomplete) - like paperclip icon
+    const insertFileAsAttachment = async (file: { id: number; name: string }) => {
+        try {
+            const response = await fetch(`${getApiBaseSync()}/all-files/${file.id}/content`);
+            if (response.ok) {
+                const data = await response.json();
+                const content = data.content || '';
+                
+                const newAttachment: ChatAttachment = {
+                    name: file.name,
+                    content_text: content,
+                    mime_type: 'text/plain',
+                };
+                
+                setLocalFileAttachments(prev => [...prev, newAttachment]);
+                console.log('[DEBUG] Added local file attachment:', file.name);
+            }
+        } catch (error) {
+            console.error('Failed to fetch file content:', error);
+        }
+        
+        // Remove the @ query from input
+        const cursorPos = inputRef.current?.selectionStart || input.length;
+        const textBeforeCursor = input.slice(0, cursorPos);
+        const textAfterCursor = input.slice(cursorPos);
+        const atIndex = textBeforeCursor.lastIndexOf('@');
+        if (atIndex >= 0) {
+            // Find the end of the filename (next whitespace or end of string)
+            let endIndex = cursorPos;
+            for (let i = cursorPos; i < textAfterCursor.length; i++) {
+                if (textAfterCursor[i] === ' ' || textAfterCursor[i] === '\n') {
+                    endIndex = i;
+                    break;
+                }
+            }
+            const newText = textBeforeCursor.slice(0, atIndex) + textAfterCursor.slice(endIndex);
+            setInput(newText.trim());
+        }
+        setShowFileAutocomplete(false);
+        setTimeout(() => inputRef.current?.focus(), 50);
+    };
+
+    // Insert curated file as attachment from folder-icon picker
+    const insertCuratedFileAsAttachment = async (file: { id: number; name: string; is_directory: boolean }) => {
+        if (file.is_directory) return;
+        
+        try {
+            const response = await fetch(`${getApiBaseSync()}/all-files/${file.id}/content`);
+            if (response.ok) {
+                const data = await response.json();
+                const content = data.content || '';
+                
+                const newAttachment: ChatAttachment = {
+                    name: file.name,
+                    content_text: content,
+                    mime_type: 'text/plain',
+                };
+                
+                setLocalFileAttachments(prev => [...prev, newAttachment]);
+                console.log('[DEBUG] Added curated file attachment:', file.name);
+            }
+        } catch (error) {
+            console.error('Failed to fetch curated file content:', error);
+        }
+        
+        setShowCuratedPicker(false);
+        fetchCuratedFiles();
+        setTimeout(() => inputRef.current?.focus(), 50);
+    };
+
+    // Remove local file attachment
+    const removeLocalFileAttachment = (name: string) => {
+        setLocalFileAttachments(prev => prev.filter(f => f.name !== name));
+    };
+
+    // Filtered curated picker list
+    const filteredCuratedPicker = curatedPickerFiles.filter(f =>
+        f.name.toLowerCase().includes(curatedPickerQuery.toLowerCase())
+    );
+
+    const handleSend = async () => {
+        if (!input.trim() || isLoading) return;
+        
+        // Check backend readiness before sending message
+        if (!backendReady) {
+            console.log('Backend not ready');
+            return;
+        }
+
+        let currentSessionId = sessionId;
+        if (!currentSessionId) {
+            currentSessionId = Date.now().toString();
+            onSessionIdChange(currentSessionId);
+        }
+
+        // Read attached files as in-memory content (temporary, NOT persisted)
+        const inlineAttachments: ChatAttachment[] = [];
+        if (attachedFiles.length > 0) {
+            console.log('[DEBUG] Processing', attachedFiles.length, 'attached files');
+            for (const file of attachedFiles) {
+                try {
+                    // Enhanced file type detection to include PDF and other document formats
+                    const isTextFile = /\.(txt|md|json|xml|yaml|yml|csv|html|css|scss|js|ts|jsx|tsx|py|java|cpp|c|cs|go|rs|php|rb|swift|kt|scala|sql|sh|bat|ps1|dockerfile|env|rtf)$/i.test(file.name);
+                    const isDocumentFile = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx)$/i.test(file.name);
+                    console.log('[DEBUG] File:', file.name, 'isText:', isTextFile, 'isDocument:', isDocumentFile, 'size:', file.size);
+                    
+                    if (isTextFile) {
+                        // Read as text for code/text files
+                        const text = await file.text();
+                        console.log('[DEBUG] Read text content, length:', text.length);
+                        inlineAttachments.push({
+                            name: file.name,
+                            content_text: text,
+                            mime_type: file.type || 'text/plain',
+                        });
+                    } else {
+                        // Read as base64 for binary files including documents
+                        const arrayBuffer = await file.arrayBuffer();
+                        const bytes = new Uint8Array(arrayBuffer);
+                        let binary = '';
+                        for (let i = 0; i < bytes.length; i++) {
+                            binary += String.fromCharCode(bytes[i]);
+                        }
+                        const base64 = btoa(binary);
+                        console.log('[DEBUG] Read binary content, base64 length:', base64.length);
+                        inlineAttachments.push({
+                            name: file.name,
+                            content_base64: base64,
+                            mime_type: file.type || (isDocumentFile ? 'application/octet-stream' : 'application/octet-stream'),
+                        });
+                    }
+                } catch (error) {
+                    console.error(`Failed to read file ${file.name}:`, error);
+                }
+            }
+            console.log('[DEBUG] Created', inlineAttachments.length, 'inline attachments');
+            // Clear references - files are now in memory only
+            selectedFilesRef.current = null;
+        }
+
+        // Include local file attachments (from @ autocomplete) - already have content fetched
+        const allAttachments = [...inlineAttachments, ...localFileAttachments];
+        console.log('[DEBUG] Total attachments:', allAttachments.length, '(inline:', inlineAttachments.length, 'local:', localFileAttachments.length, ')');
+        if (allAttachments.length > 0) {
+            allAttachments.forEach((a, i) => console.log('[DEBUG] Attachment', i, ':', a.name, 'text:', !!a.content_text, 'base64:', !!a.content_base64));
+        }
+        
+        // Get all file names for display
+        const allFileNames = [...attachedFiles.map(f => f.name), ...localFileAttachments.map(a => a.name)];
+        console.log('[DEBUG] allFileNames:', allFileNames);
+
+        const fileContext = allFileNames.length > 0
+            ? `\n[Attached files: ${allFileNames.join(', ')}]`
+            : '';
+        console.log('[DEBUG] fileContext:', fileContext);
+        const firstPrompt = !firstPromptSent.current ? input.trim() : null;
+        
+        // Determine if we need to inject content in frontend (for OpenRouter) or let backend handle it
+        const useOpenRouter = isOnlineMode && selectedModel?.source === 'openrouter' && openRouterApiKey;
+        
+        // For OpenRouter: inject attachment content directly (backend doesn't handle it)
+        // For local: let backend extract and inject via attachments array
+        let userContent = input.trim() + fileContext;
+        if (useOpenRouter && allAttachments.length > 0) {
+            let attachmentContext = '\n\n--- ATTACHED FILE CONTENTS ---';
+            for (const attach of allAttachments) {
+                const content = attach.content_text || '[Binary file content not available in online mode]';
+                attachmentContext += `
+
+=== File: ${attach.name} ===
+${content}
+=== End of ${attach.name} ===`;
+            }
+            attachmentContext += '\n--- END OF ATTACHMENTS---\n';
+            userContent = input.trim() + attachmentContext + fileContext;
+        }
+        
+        console.log('[DEBUG] userContent:', userContent);
+        
+        const userMsg: Message = { role: 'user', content: userContent };
+        const newMessages = [...messages, userMsg];
+
+        onMessagesUpdate(newMessages);
+        setInput('');
+        setAttachedFiles([]);
+        setLocalFileAttachments([]);
+        setIsLoading(true);
+        onQuestionAsked();
+
+        if (firstPrompt && !chatTitle) {
+            firstPromptSent.current = true;
+            generateTitle(firstPrompt).then(title => {
+                if (title) {
+                    updateConversationTitle(currentSessionId!, title).catch(err => console.error('Failed to save title:', err));
+                    onTitleGenerated?.(title, currentSessionId!);
+                }
+            }).catch(err => console.error('Title generation failed:', err));
+        }
+
+        try {
+            onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: '' }]);
+            let fullContent = '';
+
+            if (useOpenRouter) {
+                // Route to OpenRouter API (attachments already in message content)
+                // Strip 'openrouter:' or 'openrouter/' prefix if present - OpenRouter expects just 'provider/model' format
+                let modelIdForOpenRouter = selectedModel!.id;
+                if (modelIdForOpenRouter.startsWith('openrouter:')) {
+                    modelIdForOpenRouter = modelIdForOpenRouter.slice(11);
+                } else if (modelIdForOpenRouter.startsWith('openrouter/')) {
+                    modelIdForOpenRouter = modelIdForOpenRouter.slice(11);
+                }
+                for await (const chunk of streamChatOpenRouter(newMessages, modelIdForOpenRouter, openRouterApiKey!, currentSessionId!)) {
+                    fullContent += chunk;
+                    onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: fullContent }]);
+                }
+            } else {
+                // Route to local llama-server (backend extracts content from attachments)
+                // Pass API key for online mode to ensure it reaches the backend
+                for await (const chunk of streamChat(
+                    newMessages, 
+                    currentSessionId!, 
+                    isOnlineMode, 
+                    selectedModel?.id, 
+                    allAttachments.length > 0 ? allAttachments : undefined,
+                    isOnlineMode ? (openRouterApiKey || localStorage.getItem('aud-io-openrouter-key') || undefined) : undefined
+                )) {
+                    fullContent += chunk;
+                    onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: fullContent }]);
+                }
+            }
+        } catch (error: unknown) {
+            console.error('Chat error:', error);
+            const errMessage = error instanceof Error ? error.message : 'Unknown error';
+            let errorMsg = `An error occurred: ${errMessage}`;
+
+            if (errMessage.includes('OpenRouter')) {
+                errorMsg = `OpenRouter error: ${errMessage}`;
+            } else if (errMessage.includes('fetch')) {
+                if (isOnlineMode && selectedModel?.source === 'openrouter') {
+                    errorMsg = 'Could not connect to the OpenRouter API. Please check your API key and internet connection.';
+                } else {
+                    errorMsg = 'Could not connect to the LLM backend. Make sure the model is loaded and llama-server is running on port 8001.';
+                }
+            }
+            
+            onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: errorMsg }]);
+
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        handleSend();
+    };
+
+    const [showSaveDialog, setShowSaveDialog] = useState(false);
+    const [showWebSaveDialog, setShowWebSaveDialog] = useState(false);
+    const [pendingTranscript, setPendingTranscript] = useState<string>('');
+    const [pendingDefaultName, setPendingDefaultName] = useState<string>('chat.txt');
+
+    const handleSaveTranscript = async () => {
+        if (messages.length === 0) return;
+        try {
+            let transcript = '';
+            if (chatTitle) {
+                transcript += `Chat: ${chatTitle}\n`;
+                transcript += `Date: ${new Date().toLocaleString()}\n`;
+                transcript += '='.repeat(60) + '\n\n';
+            }
+            messages.filter(m => m.role !== 'system').forEach(msg => {
+                const sender = msg.role === 'user' ? 'User' : 'Aud.io';
+                transcript += `${sender}:\n${msg.content}\n\n`;
+            });
+            setPendingTranscript(transcript);
+            setPendingDefaultName(`${chatTitle || 'chat'}-${new Date().toISOString().slice(0, 10)}.txt`);
+            setShowWebSaveDialog(true);
+        } catch (error) {
+            console.error('Error saving transcript:', error);
+        }
+    };
+
+    const handleFileUpload = () => {
+        fileInputRef.current?.click();
+    };
+
+    const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+
+        // Accept all file types - no restrictions
+        const filteredFiles = Array.from(files);
+
+        const combined = [...attachedFiles, ...filteredFiles];
+        if (combined.length > 16) {
+            alert('You can only attach up to 16 files at a time.');
+            e.target.value = '';
+            return;
+        }
+
+        // Update state-driven attached files
+        setAttachedFiles(combined);
+
+        // Also keep the ref in sync for the upload in handleSend
+        const allFiles = combined;
+        const fileList = {
+            ...allFiles,
+            length: allFiles.length,
+            item: (index: number) => allFiles[index]
+        } as unknown as FileList;
+        selectedFilesRef.current = fileList;
+
+        e.target.value = '';
+    };
+
+    const handleRemoveFile = (fileName: string) => {
+        setRemovingFiles(prev => new Set(prev).add(fileName));
+        setTimeout(() => {
+            setAttachedFiles(prev => {
+                const updated = prev.filter(f => f.name !== fileName);
+                // Sync ref
+                if (updated.length === 0) {
+                    selectedFilesRef.current = null;
+                } else {
+                    selectedFilesRef.current = {
+                        ...updated,
+                        length: updated.length,
+                        item: (index: number) => updated[index]
+                    } as unknown as FileList;
+                }
+                return updated;
+            });
+            setRemovingFiles(prev => {
+                const next = new Set(prev);
+                next.delete(fileName);
+                return next;
+            });
+        }, 250); // matches chipSlideOut animation duration
+    };
+
+    const formatFileSize = (bytes: number) => {
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    };
+
+    const getFileIcon = (name: string) => {
+        const ext = name.split('.').pop()?.toLowerCase() || '';
+        if (['pdf'].includes(ext)) return '📄';
+        if (['doc', 'docx', 'rtf', 'odt', 'txt'].includes(ext)) return '📝';
+        if (['xls', 'xlsx', 'csv', 'ods'].includes(ext)) return '📊';
+        if (['ppt', 'pptx', 'odp'].includes(ext)) return '📽️';
+        if (['py'].includes(ext)) return '🐍';
+        if (['js', 'ts', 'jsx', 'tsx'].includes(ext)) return '⚡';
+        if (['rs'].includes(ext)) return '🦀';
+        if (['go'].includes(ext)) return '🔷';
+        if (['html', 'css', 'scss'].includes(ext)) return '🌐';
+        if (['json', 'xml', 'yaml', 'yml'].includes(ext)) return '📋';
+        if (['md'].includes(ext)) return '📑';
+        if (['sh', 'bat', 'ps1'].includes(ext)) return '⚙️';
+        return '📎';
+    };
+
+    // Helper functions to determine user setup status
+    const hasOnlineCapability = !!openRouterApiKey || !!localStorage.getItem('aud-io-openrouter-key');
+    const hasOfflineCapability = localModels.length > 0;
+
+    // Determine if we should show the model prompt banner based on user's setup status
+    // Show banner if no model is selected and user hasn't set up the capability for the current mode
+    const showModelPromptBanner = !selectedModel && (
+        (isOnlineMode && !hasOnlineCapability) ||           // Show if in online mode but no API key set up
+        (!isOnlineMode && !hasOfflineCapability)            // Show if in offline mode but no local models installed
+    );
+
+    return (
+        <div className="chat-window">
+            <SaveTranscriptDialog
+                open={showSaveDialog}
+                defaultFileName={pendingDefaultName}
+                content={pendingTranscript}
+                onClose={() => setShowSaveDialog(false)}
+                onSaved={() => setShowSaveDialog(false)}
+            />
+            <SaveTranscriptWebDialog
+                open={showWebSaveDialog}
+                defaultFileName={pendingDefaultName}
+                content={pendingTranscript}
+                onClose={() => setShowWebSaveDialog(false)}
+                onSaved={() => setShowWebSaveDialog(false)}
+            />
+
+            {/* Header */}
+            <header className="chat-header">
+                <div className="chat-header-bar centered">
+                    {/* Left: Chat Title or empty - Kept empty for plain appearance */}
+                    <div className="chat-header-left">
+                    </div>
+
+                    {/* Right: Model indicator + Online/Offline Toggle + Save Transcript + Actions */}
+                    <div className="header-actions">
+                        {/* Selected Model Indicator - only show if model matches current mode */}
+                        {selectedModel && ((isOnlineMode && selectedModel.source === 'openrouter') || (!isOnlineMode && selectedModel.source === 'local')) && (
+                            <div style={{ position: 'relative' }} ref={modelDropdownRef}>
+                                <span
+                                    style={{
+                                        fontSize: '12px', marginRight: '4px',
+                                        padding: '6px 12px', borderRadius: '9999px',
+                                        backgroundColor: 'rgb(233,233,233)',
+                                        color: 'black',
+                                        cursor: 'pointer',
+                                        display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                        maxWidth: '280px',
+                                        flexWrap: 'wrap',
+                                    }}
+                                    onClick={() => {
+                                        setIsModelDropdownOpen(!isModelDropdownOpen);
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        e.currentTarget.style.backgroundColor = '#000000';
+                                        e.currentTarget.style.color = 'white';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.currentTarget.style.backgroundColor = 'rgb(233,233,233)';
+                                        e.currentTarget.style.color = 'black';
+                                    }}
+                                    title={`Click to change model (${isOnlineMode ? 'Online' : 'Offline'})`}
+                                >
+                                    <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: isOnlineMode ? '#22C55E' : '#94A3B8', flexShrink: 0 }} />
+                                    {selectedModel.name}
+                                </span>
+                                
+                                {isModelDropdownOpen && (
+                                    <div className="dropdown-menu" style={{ top: '100%', marginTop: '4px', minWidth: '220px' }}>
+                                        {/* Show top-9 online models if in online mode */}
+                                        {isOnlineMode && openRouterModels.length > 0 && (
+                                            <>
+                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: '#5B21B6', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid var(--bg-tertiary)' }}>
+                                                    ● Top Online Models
+                                                </div>
+                                                {openRouterModels.slice(0, 9).map((model) => (
+                                                    <button
+                                                        key={model.id}
+                                                        className="dropdown-item"
+                                                        style={{
+                                                            fontSize: '12px',
+                                                            padding: '3px 10px',
+                                                            borderRadius: '999px',
+                                                            backgroundColor: selectedModel.id === model.id && selectedModel.source === 'openrouter' ? '#EDE9FE' : 'var(--bg-tertiary)',
+                                                            color: selectedModel.id === model.id && selectedModel.source === 'openrouter' ? '#5B21B6' : 'var(--text-secondary)',
+                                                            border: 'none',
+                                                            cursor: 'pointer',
+                                                            textAlign: 'left',
+                                                            width: '100%',
+                                                            marginBottom: '4px'
+                                                        }}
+                                                        onClick={() => {
+                                                            onSelectedModelChange?.({ id: model.id, name: model.name, source: 'openrouter' });
+                                                            setIsModelDropdownOpen(false);
+                                                        }}
+                                                    >
+                                                        <span>{model.name}</span>
+                                                    </button>
+                                                ))}
+                                                <button
+                                                    onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
+                                                    style={{ display: 'block', width: '100%', padding: '6px 12px', fontSize: '11px', color: '#5B21B6', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderTop: '1px solid var(--bg-tertiary)', marginTop: '2px' }}
+                                                >
+                                                    View all models →
+                                                </button>
+                                            </>
+                                        )}
+
+                                        {/* Show top-9 local/offline models if in offline mode */}
+                                        {!isOnlineMode && localModels.length > 0 && (
+                                            <>
+                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-primary)', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid var(--bg-tertiary)' }}>
+                                                    ● Offline Models
+                                                </div>
+                                                {localModels.slice(0, 9).map((model) => (
+                                                    <button
+                                                        key={model.id}
+                                                        className="dropdown-item"
+                                                        style={{
+                                                            fontSize: '12px',
+                                                            padding: '3px 10px',
+                                                            borderRadius: '999px',
+                                                            backgroundColor: selectedModel.id === model.id && selectedModel.source === 'local' ? 'var(--bg-tertiary)' : 'var(--bg-secondary)',
+                                                            color: selectedModel.id === model.id && selectedModel.source === 'local' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                                                            border: 'none',
+                                                            cursor: 'pointer',
+                                                            textAlign: 'left',
+                                                            width: '100%',
+                                                            marginBottom: '4px'
+                                                        }}
+                                                        onClick={() => {
+                                                            onSelectedModelChange?.({ id: model.id, name: model.name, source: 'local' });
+                                                            setIsModelDropdownOpen(false);
+                                                        }}
+                                                    >
+                                                        <span>{model.name}</span>
+                                                    </button>
+                                                ))}
+                                                {localModels.length > 9 && (
+                                                    <button
+                                                        onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
+                                                        style={{ display: 'block', width: '100%', padding: '6px 12px', fontSize: '11px', color: 'var(--text-secondary)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderTop: '1px solid var(--bg-tertiary)', marginTop: '2px' }}
+                                                    >
+                                                        View all models →
+                                                    </button>
+                                                )}
+                                            </>
+                                        )}
+
+                                        {/* Show message if no models available */}
+                                        {isOnlineMode && openRouterModels.length === 0 && (
+                                            <div style={{ padding: '12px', fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'center' }}>
+                                                <p style={{ margin: '0 0 8px 0' }}>No online models available.</p>
+                                                <p style={{ margin: '0 0 8px 0', fontSize: '11px', color: 'var(--text-muted)' }}>Add an OpenRouter API key to use cloud models.</p>
+                                                <button
+                                                    onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
+                                                    style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: '#1e40af', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 500 }}
+                                                >
+                                                    Browse Models
+                                                </button>
+                                            </div>
+                                        )}
+                                        {!isOnlineMode && localModels.length === 0 && (
+                                            <div style={{ padding: '12px', fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'center' }}>
+                                                <p style={{ margin: '0 0 8px 0' }}>No offline models installed.</p>
+                                                <p style={{ margin: '0 0 8px 0', fontSize: '11px', color: 'var(--text-muted)' }}>Download models to use them locally without internet.</p>
+                                                <button
+                                                    onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
+                                                    style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: '#1e40af', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 500 }}
+                                                >
+                                                    Browse & Download
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        
+                        {/* Show capsule with dropdown when no model matches current mode */}
+                        {(!selectedModel || (isOnlineMode && selectedModel?.source !== 'openrouter') || (!isOnlineMode && selectedModel?.source !== 'local')) && (
+                            <div style={{ position: 'relative' }} ref={modelDropdownRef}>
+                                <span
+                                    style={{
+                                        fontSize: '12px', marginRight: '4px',
+                                        padding: '6px 12px', borderRadius: '9999px',
+                                        backgroundColor: 'rgb(233,233,233)',
+                                        color: 'black',
+                                        cursor: 'pointer',
+                                        display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                    }}
+                                    onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
+                                    onMouseEnter={(e) => {
+                                        e.currentTarget.style.backgroundColor = '#000000';
+                                        e.currentTarget.style.color = 'white';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.currentTarget.style.backgroundColor = 'rgb(233,233,233)';
+                                        e.currentTarget.style.color = 'black';
+                                    }}
+                                    title="Click to select a model"
+                                >
+                                    <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: isOnlineMode ? '#22C55E' : '#94A3B8', flexShrink: 0 }} />
+                                    Browse Models
+                                </span>
+                                {isModelDropdownOpen && (
+                                    <div className="dropdown-menu" style={{ top: '100%', marginTop: '4px', minWidth: '220px' }}>
+                                        {isOnlineMode && openRouterModels.length > 0 && (
+                                            <>
+                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: '#5B21B6', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid var(--bg-tertiary)' }}>
+                                                    ● Top Online Models
+                                                </div>
+                                                {openRouterModels.slice(0, 9).map((model) => (
+                                                    <button
+                                                        key={model.id}
+                                                        className="dropdown-item"
+                                                        style={{ fontSize: '12px', padding: '6px 12px', border: 'none', cursor: 'pointer', textAlign: 'left', width: '100%', marginBottom: '2px' }}
+                                                        onClick={() => {
+                                                            onSelectedModelChange?.({ id: model.id, name: model.name, source: 'openrouter' });
+                                                            setIsModelDropdownOpen(false);
+                                                        }}
+                                                    >
+                                                        <span>{model.name}</span>
+                                                    </button>
+                                                ))}
+                                                <button
+                                                    onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
+                                                    style={{ display: 'block', width: '100%', padding: '6px 12px', fontSize: '11px', color: '#5B21B6', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderTop: '1px solid var(--bg-tertiary)', marginTop: '2px' }}
+                                                >
+                                                    View all models →
+                                                </button>
+                                            </>
+                                        )}
+                                        {!isOnlineMode && localModels.length > 0 && (
+                                            <>
+                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-primary)', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid var(--bg-tertiary)' }}>
+                                                    ● Offline Models
+                                                </div>
+                                                {localModels.slice(0, 9).map((model) => (
+                                                    <button
+                                                        key={model.id}
+                                                        className="dropdown-item"
+                                                        style={{ fontSize: '12px', padding: '6px 12px', border: 'none', cursor: 'pointer', textAlign: 'left', width: '100%', marginBottom: '2px' }}
+                                                        onClick={() => {
+                                                            onSelectedModelChange?.({ id: model.id, name: model.name, source: 'local' });
+                                                            setIsModelDropdownOpen(false);
+                                                        }}
+                                                    >
+                                                        <span>{model.name}</span>
+                                                    </button>
+                                                ))}
+                                                {localModels.length > 9 && (
+                                                    <button
+                                                        onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
+                                                        style={{ display: 'block', width: '100%', padding: '6px 12px', fontSize: '11px', color: 'var(--text-secondary)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderTop: '1px solid var(--bg-tertiary)', marginTop: '2px' }}
+                                                    >
+                                                        View all models →
+                                                    </button>
+                                                )}
+                                            </>
+                                        )}
+                                        {((isOnlineMode && openRouterModels.length === 0) || (!isOnlineMode && localModels.length === 0)) && (
+                                            <div style={{ padding: '12px', fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'center' }}>
+                                                <p style={{ margin: '0 0 8px 0' }}>{isOnlineMode ? 'No online models available.' : 'No offline models installed.'}</p>
+                                                <button
+                                                    onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
+                                                    style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: isOnlineMode ? '#6366F1' : '#1e40af', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 500 }}
+                                                >
+                                                    {isOnlineMode ? 'Open Models Panel' : 'Browse & Download'}
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Online/Offline Toggle */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginRight: '8px' }}>
+                            <span style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                                {isOnlineMode ? 'Online' : 'Offline'}
+                            </span>
+                            <button
+                                type="button"
+                                className={`activity-toggle ${isOnlineMode ? 'active' : ''}`}
+                                onClick={() => {
+                                    // Check if API key exists in localStorage but not in props
+                                    const localStorageApiKey = localStorage.getItem('aud-io-openrouter-key');
+                                    const hasApiKey = openRouterApiKey || localStorageApiKey;
+                                    
+                                    if (isOnlineMode) {
+                                        // Switching to OFFLINE: auto-select a local model if currently using openrouter
+                                        if (selectedModel?.source === 'openrouter' && localModels.length > 0) {
+                                            onSelectedModelChange?.({
+                                                id: localModels[0].id,
+                                                name: localModels[0].name,
+                                                source: 'local'
+                                            });
+                                        }
+                                        onToggleOnlineMode?.(false);
+                                        return;
+                                    }
+
+                                    if (!isOnlineMode && !hasApiKey) {
+                                        // No API key — prompt the user to add one.
+                                        // When they save, the onComplete callback enables online mode.
+                                        showOpenRouterApiKeyModal(
+                                            (newKey) => {
+                                                onOpenRouterApiKeyChange?.(newKey);
+                                            },
+                                            setApiKey,
+                                            () => {
+                                                // After key is saved: auto-select an OpenRouter model and enable online mode
+                                                if (selectedModel?.source === 'local' && openRouterModels.length > 0) {
+                                                    onSelectedModelChange?.({
+                                                        id: openRouterModels[0].id,
+                                                        name: openRouterModels[0].name,
+                                                        source: 'openrouter'
+                                                    });
+                                                }
+                                                onToggleOnlineMode?.(true);
+                                            }
+                                        );
+                                    } else {
+                                        // Switching to ONLINE with existing API key
+                                        if (!openRouterApiKey && localStorage.getItem('aud-io-openrouter-key')) {
+                                            const storedKey = localStorage.getItem('aud-io-openrouter-key');
+                                            if (storedKey) {
+                                                onOpenRouterApiKeyChange?.(storedKey);
+                                            }
+                                        }
+                                        // Auto-select an OpenRouter model if currently using local
+                                        if (selectedModel?.source === 'local' && openRouterModels.length > 0) {
+                                            onSelectedModelChange?.({
+                                                id: openRouterModels[0].id,
+                                                name: openRouterModels[0].name,
+                                                source: 'openrouter'
+                                            });
+                                        }
+                                        onToggleOnlineMode?.(true);
+                                    }
+                                }}
+                                title={isOnlineMode ? 'Switch to offline mode (local model)' : 'Switch to online mode (web search + APIs)'}
+                                style={{ width: '36px', height: '20px', borderRadius: '10px' }}
+                            >
+                                <div className="activity-toggle-thumb" style={{ width: '16px', height: '16px', top: '2px', left: '2px', transform: isOnlineMode ? 'translateX(16px)' : 'none' }} />
+                            </button>
+                        </div>
+
+                        {/* Download/Save Transcript Button */}
+                        {hasMessages && (
+                            <button
+                                type="button"
+                                className="header-capsule-btn"
+                                onClick={handleSaveTranscript}
+                                title="Save transcript"
+                                style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                            >
+                                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                </svg>
+                                <span>Save</span>
+                            </button>
+                        )}
+
+                        {chatId && (
+                            <div style={{ position: 'relative' }} ref={dropdownRef}>
+                                <button
+                                    type="button"
+                                    className="header-capsule-btn"
+                                    aria-label="More options"
+                                    onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+                                >
+                                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm0 8a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm0 8a1.5 1.5 0 110-3 1.5 1.5 0 010 3z" />
+                                    </svg>
+                                </button>
+                                {isDropdownOpen && (
+                                    <div className="dropdown-menu">
+                                        <button className="dropdown-item" onClick={() => { onPinChat?.(chatId); setIsDropdownOpen(false); }}>
+                                            <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                                            </svg>
+                                            <span>{isPinned ? 'Unpin chat' : 'Pin chat'}</span>
+                                        </button>
+                                        <button className="dropdown-item delete" onClick={() => setShowDeleteConfirm(true)}>
+                                            <svg className="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                            </svg>
+                                            <span>Delete</span>
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </header>
+
+            {/* Messages Area */}
+            <main className="chat-messages">
+                <div className="chat-messages-container">
+                    {/* Welcome Screen */}
+                    {!hasMessages && (
+                        <div className="chat-welcome">
+                            <h1 className="chat-welcome-title">
+                                <svg width="32" height="32" viewBox="0 0 40 40" fill="none" className="chat-welcome-logo-inline">
+                                    <polygon points="20,4 36,36 4,36" stroke="currentColor" strokeWidth="2.5" fill="none" strokeLinejoin="round" />
+                                </svg>
+                                _Aud.io <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>|</span> Chat Interface
+                            </h1>
+                            <p className="chat-welcome-subtitle">Ask anything to get started</p>
+
+
+                        </div>
+                    )}
+
+                    {messages.filter(m => m.role !== 'system').map((msg, idx) => (
+                        <div key={idx} className={`message-wrapper ${msg.role}`}>
+                            {msg.role === 'user' ? (
+                                <div className="message-bubble user">
+                                    <MessageContent content={msg.content} role="user" />
+                                </div>
+                            ) : (
+                                <div className="message-content-plain">
+                                    <MessageContent content={msg.content} role="assistant" />
+                                </div>
+                            )}
+                        </div>
+                    ))}
+                    {isLoading && (
+                        <div className="message-wrapper assistant">
+                            <div className="loading-bubble">
+                                <div className="loading-dot" />
+                                <div className="loading-dot" />
+                                <div className="loading-dot" />
+                            </div>
+                        </div>
+                    )}
+                    
+                    <div ref={messagesEndRef} />
+                </div>
+            </main>
+
+            {/* Input Bar - no footer compartment */}
+            <div className="chat-input-bar" style={{ position: 'relative' }}>
+                {/* Model Prompt Banner - shown based on user setup status */}
+                {showModelPromptBanner && (
+                    <ModelPromptBanner
+                        isOnlineMode={isOnlineMode}
+                        hasApiKey={!!(openRouterApiKey || localStorage.getItem('aud-io-openrouter-key'))}
+                        onOpenModels={(focusApiKey = false, focusHfToken = false) => onOpenModels?.(focusApiKey, focusHfToken)}
+                        onToggleOnlineMode={onToggleOnlineMode}
+                    />
+                )}
+                {/* Attachment Tray - above input box */}
+                {(attachedFiles.length > 0 || localFileAttachments.length > 0) && (
+                    <div className="attachment-tray-above-input">
+                        {attachedFiles.map((file, index) => (
+                            <div key={`${file.name}-${index}`} className="attachment-chip">
+                                <span className="attachment-icon">{getFileIcon(file.name)}</span>
+                                <span className="attachment-name" title={file.name}>{file.name}</span>
+                                <span className="attachment-size">{formatFileSize(file.size)}</span>
+                                <button type="button" className="attachment-remove" onClick={() => handleRemoveFile(file.name)}>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><path d="M18 6L6 18M6 6l12 12" /></svg>
+                                </button>
+                            </div>
+                        ))}
+                        {localFileAttachments.map((file, index) => (
+                            <div key={`local-${file.name}-${index}`} className="attachment-chip">
+                                <span className="attachment-icon">{getFileIcon(file.name)}</span>
+                                <span className="attachment-name" title={file.name}>{file.name}</span>
+                                <span className="attachment-size">{file.content_text ? `${(file.content_text.length / 1024).toFixed(1)} KB` : '-'}</span>
+                                <button type="button" className="attachment-remove" onClick={() => removeLocalFileAttachment(file.name)}>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><path d="M18 6L6 18M6 6l12 12" /></svg>
+                                </button>
+                            </div>
+                        ))}
+                        <span className="attachment-count">{(attachedFiles.length + localFileAttachments.length)} file(s)</span>
+                    </div>
+                )}
+                <form onSubmit={handleSubmit} className="chat-input-form">
+                    <div className="chat-input-pill">
+                        <input type="file" ref={fileInputRef} onChange={handleFileSelected} style={{ display: 'none' }} multiple accept=".pdf,.doc,.docx,.txt,.rtf,.odt,.xls,.xlsx,.csv,.ods,.ppt,.pptx,.odp,.js,.ts,.jsx,.tsx,.py,.java,.cpp,.c,.cs,.html,.css,.scss,.json,.xml,.yaml,.yml,.md,.go,.rs,.php,.rb,.swift,.kt,.scala,.sql,.sh,.bat,.ps1,.dockerfile,.env" />
+                        <button
+                            type="button"
+                            className="input-icon-btn"
+                            onClick={handleFileUpload}
+                            title="Attach file"
+                        >
+                            <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                            </svg>
+                        </button>
+                        {/* Curated files picker button — always visible, opens picker panel */}
+                        <button
+                            type="button"
+                            className={`input-icon-btn ${showCuratedPicker ? 'attach-btn-active' : ''}`}
+                            onClick={() => {
+                                setCuratedPickerQuery('');
+                                fetchCuratedFiles();
+                                setShowCuratedPicker(!showCuratedPicker);
+                            }}
+                            title="Insert from Local Storage Files"
+                        >
+                            <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                            </svg>
+                        </button>
+                        <div style={{ position: 'relative', flex: 1 }}>
+                            <input
+                                ref={inputRef}
+                                value={input}
+                                onChange={handleInputChange}
+                                onKeyDown={handleInputKeyDown}
+                                placeholder="Ask anything (type @ or click 📁 for Local Storage files)"
+                                className="chat-input"
+                            />
+                            {/* @filename autocomplete dropdown — curated files only */}
+                            {showFileAutocomplete && filteredLocalFiles.length > 0 && (
+                                <div ref={fileAutocompleteRef} className="file-autocomplete-dropdown">
+                                    <div className="file-autocomplete-header">Curated Files</div>
+                                    {filteredLocalFiles.map((file, idx) => (
+                                        <div
+                                            key={file.id}
+                                            className={`file-autocomplete-item ${idx === fileAutocompleteIndex ? 'selected' : ''}`}
+                                            onClick={() => insertFileAsAttachment(file)}
+                                            onMouseEnter={() => setFileAutocompleteIndex(idx)}
+                                        >
+                                            <span className="file-autocomplete-icon">{getFileIcon(file.name)}</span>
+                                            <span className="file-autocomplete-name">{file.name}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            {/* Curated files picker panel - dropdown above input */}
+                            {showCuratedPicker && (
+                                <div ref={curatedPickerRef} className="file-autocomplete-dropdown" style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: '8px', maxHeight: '300px' }}>
+                                    <div className="file-autocomplete-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <span>Local Storage Files</span>
+                                        <span style={{ fontSize: '11px', fontWeight: 400, opacity: 0.7 }}>Click to insert @filename</span>
+                                    </div>
+                                    <input
+                                        type="text"
+                                        placeholder="Search files..."
+                                        value={curatedPickerQuery}
+                                        onChange={(e) => setCuratedPickerQuery(e.target.value)}
+                                        style={{ width: 'calc(100% - 24px)', margin: '8px 12px', padding: '6px 8px', borderRadius: '4px', border: '1px solid var(--border-primary)', backgroundColor: 'var(--bg-input)', color: 'var(--text-primary)', fontSize: '13px', outline: 'none' }}
+                                        autoFocus
+                                    />
+                                    <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                                        {filteredCuratedPicker.length === 0 ? (
+                                            <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
+                                                {curatedPickerFiles.length === 0 ? 'No files in Local Storage' : 'No matching files'}
+                                            </div>
+                                        ) : (
+                                            filteredCuratedPicker.map((file, idx) => (
+                                                <div
+                                                    key={file.id}
+                                                    className="file-autocomplete-item"
+                                                    onClick={() => insertCuratedFileAsAttachment(file)}
+                                                    style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+                                                >
+                                                    <span className="file-autocomplete-icon">{getFileIcon(file.name)}</span>
+                                                    <span className="file-autocomplete-name">{file.name}</span>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                    {curatedPickerFiles.length > 0 && (
+                                        <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border-primary)', fontSize: '11px', color: 'var(--text-muted)' }}>
+                                            {curatedPickerFiles.length} file(s) available in Local Storage
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                        <button type="submit" disabled={isLoading || !input.trim()} className="input-send-btn">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                            </svg>
+                        </button>
+                    </div>
+                    <p className="chat-disclaimer">AI can make mistakes. Please verify important information.</p>
+                </form>
+            </div>
+
+            {/* Delete Confirmation Modal */}
+            {showDeleteConfirm && (
+                <div className="modal-overlay">
+                    <div className="modal">
+                        <div className="modal-header">
+                            <svg className="modal-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4v2m0 4v2m0-14a9 9 0 110 18 9 9 0 010-18zm0 0a9 9 0 110 18 9 9 0 010-18z" />
+                            </svg>
+                        </div>
+                        <h2 className="modal-title">Delete Chat</h2>
+                        <p className="modal-message">Are you sure you want to delete this chat?</p>
+                        <div className="modal-buttons">
+                            <button className="modal-button cancel" onClick={() => { setShowDeleteConfirm(false); setIsDropdownOpen(false); }}>Cancel</button>
+                            <button
+                                className="modal-button delete"
+                                disabled={!chatId || isDeleting}
+                                onClick={() => {
+                                    const deleteChat = async () => {
+                                        try {
+                                            if (!chatId || !onDeleteChat) return;
+                                            setIsDeleting(true);
+                                            await onDeleteChat(chatId);
+                                            setShowDeleteConfirm(false);
+                                            setIsDropdownOpen(false);
+                                        } catch (error) {
+                                            console.error('Error deleting chat:', error);
+                                            alert('Failed to delete chat: ' + (error instanceof Error ? error.message : String(error)));
+                                        } finally {
+                                            setIsDeleting(false);
+                                        }
+                                    };
+                                    deleteChat();
+                                }}
+                            >
+                                {isDeleting ? 'Deleting...' : 'Delete'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
