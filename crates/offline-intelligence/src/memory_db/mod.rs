@@ -76,30 +76,34 @@ impl MemoryDatabase {
             std::fs::create_dir_all(parent)?;
         }
 
+        // Apply pragmas on EVERY connection from the pool.
+        // PRAGMA foreign_keys is per-connection in SQLite — without this, ON DELETE CASCADE
+        // is silently ignored on all connections except the first initialization one.
         let manager = SqliteConnectionManager::file(db_path)
             .with_flags(
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                 | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
                 | rusqlite::OpenFlags::SQLITE_OPEN_FULL_MUTEX,
-            );
+            )
+            .with_init(|conn| {
+                conn.execute_batch(
+                    "PRAGMA foreign_keys = ON;
+                     PRAGMA journal_mode = WAL;
+                     PRAGMA synchronous = NORMAL;
+                     PRAGMA busy_timeout = 5000;",
+                )
+            });
 
         let pool = Pool::builder()
             .max_size(10)
             .build(manager)
             .map_err(|e| anyhow::anyhow!("Failed to create connection pool: {}", e))?;
 
-        // Initialize DB and pragmas - FIXED: Use mutable connection
+        // Run schema migrations on startup
         {
             let mut conn = pool.get()?;
             let mut migrator = migration::MigrationManager::new(&mut conn);
             migrator.initialize_database()?;
-
-            conn.execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 PRAGMA journal_mode = WAL;
-                 PRAGMA synchronous = NORMAL;
-                 PRAGMA busy_timeout = 5000;",
-            )?;
         }
 
         let pool = Arc::new(pool);

@@ -16,6 +16,7 @@ interface SidebarProps {
   chats?: Conversation[];
   selectedChatId?: string | null;
   activeChatId?: string | null;
+  deletingChatId?: string | null;
   onNewChat?: () => void;
   onSelectChat?: (chatId: string) => void;
   onDeleteChat?: (chatId: string) => void;
@@ -40,6 +41,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   chats,
   selectedChatId,
   activeChatId,
+  deletingChatId,
   onNewChat,
   onSelectChat,
   onDeleteChat,
@@ -86,7 +88,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       .sort((a, b) => {
         if (a.pinned && !b.pinned) return -1;
         if (!a.pinned && b.pinned) return 1;
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        // Oldest first: first conversation at the top, latest at the bottom
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
       });
   }, [source, search]);
 
@@ -193,12 +196,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 chat={chat}
                 isSelected={chat.id === selected}
                 isHovered={hoveredChat === chat.id}
+                isDeleting={deletingChatId === chat.id}
                 onMouseEnter={() => setHoveredChat(chat.id)}
                 onMouseLeave={() => setHoveredChat(null)}
-                onSelect={() => onSelectChat?.(chat.id)}
-                onPin={() => onPinChat?.(chat.id)}
-                onSave={() => onSaveChat?.(chat.id)}
-                onDelete={() => onDeleteChat?.(chat.id)}
+                onSelect={() => deletingChatId ? undefined : onSelectChat?.(chat.id)}
+                onPin={() => deletingChatId ? undefined : onPinChat?.(chat.id)}
+                onSave={() => deletingChatId ? undefined : onSaveChat?.(chat.id)}
+                onDelete={() => deletingChatId ? undefined : onDeleteChat?.(chat.id)}
               />
             ))}
           </ul>
@@ -219,12 +223,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
             chat={chat}
             isSelected={chat.id === selected}
             isHovered={hoveredChat === chat.id}
+            isDeleting={deletingChatId === chat.id}
             onMouseEnter={() => setHoveredChat(chat.id)}
             onMouseLeave={() => setHoveredChat(null)}
-            onSelect={() => onSelectChat?.(chat.id)}
-            onPin={() => onPinChat?.(chat.id)}
-            onSave={() => onSaveChat?.(chat.id)}
-            onDelete={() => onDeleteChat?.(chat.id)}
+            onSelect={() => deletingChatId ? undefined : onSelectChat?.(chat.id)}
+            onPin={() => deletingChatId ? undefined : onPinChat?.(chat.id)}
+            onSave={() => deletingChatId ? undefined : onSaveChat?.(chat.id)}
+            onDelete={() => deletingChatId ? undefined : onDeleteChat?.(chat.id)}
           />
         ))}
       </ul>
@@ -303,20 +308,27 @@ const ChatItem: React.FC<{
   chat: Conversation;
   isSelected: boolean;
   isHovered: boolean;
+  isDeleting?: boolean;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
   onSelect: () => void;
   onPin: () => void;
   onSave: () => void;
   onDelete: () => void;
-}> = ({ chat, isSelected, isHovered, onMouseEnter, onMouseLeave, onSelect, onPin, onSave, onDelete }) => {
+}> = ({ chat, isSelected, isHovered, isDeleting, onMouseEnter, onMouseLeave, onSelect, onPin, onSave, onDelete }) => {
   return (
     <li
-      className={`sidebar-chat-item ${isSelected ? 'selected' : ''}`}
+      className={`sidebar-chat-item ${isSelected ? 'selected' : ''} ${isDeleting ? 'deleting' : ''}`}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
     >
       <div className="sidebar-chat-row">
+        {/* Deleting indicator */}
+        {isDeleting && (
+          <div className="sidebar-chat-deleting">
+            <div className="sidebar-spinner" />
+          </div>
+        )}
         {/* Indicators */}
         <div className="sidebar-chat-indicators">
           {chat.pinned && (

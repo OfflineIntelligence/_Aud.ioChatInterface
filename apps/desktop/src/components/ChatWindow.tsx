@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import type { Message, ChatAttachment } from '../api/chat';
-import { streamChat, streamChatOpenRouter, updateConversationTitle } from '../api/chat';
+import { streamChat, updateConversationTitle } from '../api/chat';
 import { getApiBaseSync } from '../api/backendUrl';
 import { useChatTitle } from '../hooks/useChatTitle';
 import { useAuth } from '../contexts/AuthContext';
@@ -106,6 +106,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
     // Backend readiness state
     const [backendReady, setBackendReady] = useState(false);
+    // Model ready state - tracks actual model loading status
+    const [modelReady, setModelReady] = useState(false);
     
     // @filename autocomplete state — sourced exclusively from curated files
     const [localFiles, setLocalFiles] = useState<Array<{ id: number; name: string; path: string; is_directory: boolean }>>([]);
@@ -143,32 +145,29 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 const response = await fetch(`${getApiBaseSync()}/healthz`);
                 if (cancelled) return;
                 if (response.ok) {
-                    // Enhanced health check: Accept both "ready" and "degraded" states
                     try {
                         const healthData = await response.json();
                         // healthData = { status: "ready" | "initializing" | "degraded", runtime_ready: boolean, message?: string }
 
-                        // For OLLAMA-style behavior: Accept "degraded" (no model) as backend ready
-                        // User can download/activate models through UI
-                        if (healthData.status === 'ready' || healthData.status === 'degraded') {
-                            setBackendReady(true);
-                            console.log('Backend ready:', healthData.status, healthData.runtime_ready ? '(model loaded)' : '(no model loaded yet)');
-                        } else if (healthData.status === 'initializing') {
-                            console.log('Backend still initializing...');
-                            setBackendReady(false);
-                            // Retry after delay
-                            const delay = Math.min(10000, 500 * Math.pow(2, attempt + 1));
-                            timeoutId = setTimeout(() => checkBackendReadiness(attempt + 1), delay);
-                        } else {
-                            // Unknown status - retry
-                            setBackendReady(false);
+                        // Check if backend is initialized (not still starting up)
+                        const isBackendReady = healthData.status === 'ready' || healthData.status === 'degraded';
+                        setBackendReady(isBackendReady);
+
+                        // Check if runtime/model is actually loaded - this is what matters for sending messages
+                        const isModelReady = healthData.runtime_ready === true;
+                        setModelReady(isModelReady);
+
+                        console.log('Backend ready:', healthData.status, 'Model ready:', isModelReady);
+
+                        // Keep polling until both backend and model are ready
+                        if (!isBackendReady || !isModelReady) {
                             const delay = Math.min(10000, 500 * Math.pow(2, attempt + 1));
                             timeoutId = setTimeout(() => checkBackendReadiness(attempt + 1), delay);
                         }
                     } catch (parseError) {
-                        // Fallback if JSON parsing fails (backward compatibility)
-                        console.warn('Health check response format unexpected, assuming ready');
-                        setBackendReady(true);
+                        console.warn('Health check response format unexpected');
+                        setBackendReady(false);
+                        setModelReady(false);
                     }
                 } else {
                     throw new Error(`Backend health check failed with status: ${response.status}`);
@@ -177,8 +176,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 if (cancelled) return;
                 console.warn('Backend not ready yet, attempt:', attempt + 1);
                 setBackendReady(false);
+                setModelReady(false);
 
-                // Exponential backoff: retry after progressively longer delays (max 10s)
                 const delay = Math.min(10000, 500 * Math.pow(2, attempt + 1));
                 timeoutId = setTimeout(() => checkBackendReadiness(attempt + 1), delay);
             }
@@ -494,12 +493,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
     const handleSend = async () => {
         if (!input.trim() || isLoading) return;
-        
-        // Check backend readiness before sending message
-        if (!backendReady) {
-            console.log('Backend not ready');
-            return;
-        }
 
         let currentSessionId = sessionId;
         if (!currentSessionId) {
@@ -569,25 +562,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         console.log('[DEBUG] fileContext:', fileContext);
         const firstPrompt = !firstPromptSent.current ? input.trim() : null;
         
-        // Determine if we need to inject content in frontend (for OpenRouter) or let backend handle it
-        const useOpenRouter = isOnlineMode && selectedModel?.source === 'openrouter' && openRouterApiKey;
-        
-        // For OpenRouter: inject attachment content directly (backend doesn't handle it)
-        // For local: let backend extract and inject via attachments array
-        let userContent = input.trim() + fileContext;
-        if (useOpenRouter && allAttachments.length > 0) {
-            let attachmentContext = '\n\n--- ATTACHED FILE CONTENTS ---';
-            for (const attach of allAttachments) {
-                const content = attach.content_text || '[Binary file content not available in online mode]';
-                attachmentContext += `
-
-=== File: ${attach.name} ===
-${content}
-=== End of ${attach.name} ===`;
-            }
-            attachmentContext += '\n--- END OF ATTACHMENTS---\n';
-            userContent = input.trim() + attachmentContext + fileContext;
-        }
+        const userContent = input.trim() + fileContext;
         
         console.log('[DEBUG] userContent:', userContent);
         
@@ -596,12 +571,18 @@ ${content}
 
         onMessagesUpdate(newMessages);
         setInput('');
-        setAttachedFiles([]);
-        setLocalFileAttachments([]);
+        
+        // Clear attachments only after we successfully start the stream
+        // If there's an error, attachments will remain for retry
+        const clearAttachments = () => {
+            setAttachedFiles([]);
+            setLocalFileAttachments([]);
+        };
+        
         setIsLoading(true);
         onQuestionAsked();
 
-        if (firstPrompt && !chatTitle) {
+        if (firstPrompt && !chatTitle && modelReady) {
             firstPromptSent.current = true;
             generateTitle(firstPrompt).then(title => {
                 if (title) {
@@ -614,35 +595,26 @@ ${content}
         try {
             onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: '' }]);
             let fullContent = '';
+            let streamStarted = false;
 
-            if (useOpenRouter) {
-                // Route to OpenRouter API (attachments already in message content)
-                // Strip 'openrouter:' or 'openrouter/' prefix if present - OpenRouter expects just 'provider/model' format
-                let modelIdForOpenRouter = selectedModel!.id;
-                if (modelIdForOpenRouter.startsWith('openrouter:')) {
-                    modelIdForOpenRouter = modelIdForOpenRouter.slice(11);
-                } else if (modelIdForOpenRouter.startsWith('openrouter/')) {
-                    modelIdForOpenRouter = modelIdForOpenRouter.slice(11);
+            // Route all sends through the backend which handles both offline (local LLM)
+            // and online (OpenRouter) modes with proper attachment extraction for all file types
+            for await (const chunk of streamChat(
+                newMessages,
+                currentSessionId!,
+                isOnlineMode,
+                selectedModel?.id,
+                allAttachments.length > 0 ? allAttachments : undefined,
+                isOnlineMode ? (openRouterApiKey || localStorage.getItem('aud-io-openrouter-key') || undefined) : undefined
+            )) {
+                if (!streamStarted) {
+                    streamStarted = true;
+                    clearAttachments();
                 }
-                for await (const chunk of streamChatOpenRouter(newMessages, modelIdForOpenRouter, openRouterApiKey!, currentSessionId!)) {
-                    fullContent += chunk;
-                    onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: fullContent }]);
-                }
-            } else {
-                // Route to local llama-server (backend extracts content from attachments)
-                // Pass API key for online mode to ensure it reaches the backend
-                for await (const chunk of streamChat(
-                    newMessages, 
-                    currentSessionId!, 
-                    isOnlineMode, 
-                    selectedModel?.id, 
-                    allAttachments.length > 0 ? allAttachments : undefined,
-                    isOnlineMode ? (openRouterApiKey || localStorage.getItem('aud-io-openrouter-key') || undefined) : undefined
-                )) {
-                    fullContent += chunk;
-                    onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: fullContent }]);
-                }
+                fullContent += chunk;
+                onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: fullContent }]);
             }
+            // If we got here, stream completed successfully - attachments already cleared
         } catch (error: unknown) {
             console.error('Chat error:', error);
             const errMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -659,6 +631,7 @@ ${content}
             }
             
             onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: errorMsg }]);
+            // Don't clear attachments on error - they remain for retry
 
         } finally {
             setIsLoading(false);

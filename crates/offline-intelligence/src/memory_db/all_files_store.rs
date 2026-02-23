@@ -419,6 +419,33 @@ impl AllFilesStore {
         ).map_err(|e| anyhow::anyhow!("File not found: {}", e))
     }
 
+    /// Get file by exact name (first match)
+    pub fn get_file_by_name(&self, name: &str) -> anyhow::Result<AllFile> {
+        let conn = self.pool.get()?;
+
+        conn.query_row(
+            "SELECT id, name, path, parent_id, is_directory, file_path, size_bytes, mime_type, created_at, modified_at, last_accessed, access_count
+             FROM all_files WHERE name = ?1 AND is_directory = FALSE LIMIT 1",
+            [name],
+            |row| {
+                Ok(AllFile {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                    parent_id: row.get(3)?,
+                    is_directory: row.get(4)?,
+                    file_path: row.get(5)?,
+                    size_bytes: row.get(6)?,
+                    mime_type: row.get(7)?,
+                    created_at: row.get::<_, String>(8)?.parse().unwrap_or_else(|_| Utc::now()),
+                    modified_at: row.get::<_, String>(9)?.parse().unwrap_or_else(|_| Utc::now()),
+                    last_accessed: row.get::<_, Option<String>>(10)?.and_then(|s| s.parse().ok()),
+                    access_count: row.get(11)?,
+                })
+            },
+        ).map_err(|e| anyhow::anyhow!("File not found by name: {}", e))
+    }
+
     /// Get file content as string
     pub fn get_file_content_string(&self, id: i64) -> anyhow::Result<String> {
         let file = self.get_file(id)?;

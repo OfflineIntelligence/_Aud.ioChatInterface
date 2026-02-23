@@ -337,6 +337,11 @@ export async function deleteConversation(id: string): Promise<boolean> {
         const response = await fetch(`${getApiBaseSync()}/conversations/${id}`, {
             method: 'DELETE',
         });
+        // 404 means conversation doesn't exist - treat as success
+        if (response.status === 404) {
+            console.warn(`Conversation [${id}] not found in backend, treating as deleted`);
+            return true;
+        }
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }

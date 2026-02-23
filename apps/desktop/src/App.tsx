@@ -15,13 +15,43 @@ import FeedbackPopup from './components/FeedbackPopup'
 import { useAuth } from './contexts/AuthContext'
 import type { Chat } from './components/ChatWindow'
 import type { Message } from './api/chat'
-import { fetchConversations, fetchConversation, deleteConversation, updateConversationPinned } from './api/chat'
+import { fetchConversations, fetchConversation, deleteConversation } from './api/chat'
 import { getApiBaseSync } from './api/backendUrl'
 import { getAllApiKeys, migrateKeysFromLocalStorage } from './api/apiKeys'
 import './App.css'
 
 function App() {
   return <MainApp />;
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar-only pin/save state — persisted in localStorage, never in SQLite.
+// The SQLite `pinned` column is no longer written; only these helpers drive
+// the sidebar's pinned/saved sections.
+// ---------------------------------------------------------------------------
+const PINNED_KEY = 'aud-io-pinned-sessions';
+const SAVED_KEY  = 'aud-io-saved-sessions';
+
+function getPinnedIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(PINNED_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch { return new Set(); }
+}
+
+function getSavedIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(SAVED_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch { return new Set(); }
+}
+
+function setPinnedIds(ids: Set<string>): void {
+  localStorage.setItem(PINNED_KEY, JSON.stringify([...ids]));
+}
+
+function setSavedIds(ids: Set<string>): void {
+  localStorage.setItem(SAVED_KEY, JSON.stringify([...ids]));
 }
 
 function MainApp() {
@@ -44,7 +74,12 @@ function MainApp() {
   const [questionCount, setQuestionCount] = useState(0);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showFeedbackPopup, setShowFeedbackPopup] = useState(false);
-  const [isOnlineMode, setIsOnlineMode] = useState(false);
+  const [isOnlineMode, setIsOnlineMode] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('aud-io-online-mode');
+      return saved === 'true';
+    } catch { return false; }
+  });
 
   const [selectedModel, setSelectedModel] = useState<{
     id: string;
@@ -224,12 +259,16 @@ function MainApp() {
     const loadConversations = async () => {
       try {
         const conversations = await fetchConversations();
+        // Pin/save live in localStorage only — ignore the SQLite `pinned` field.
+        const pinnedIds = getPinnedIds();
+        const savedIds  = getSavedIds();
         const loadedChats: Chat[] = conversations.map(conv => ({
           id: conv.id,
           title: conv.title,
           messages: [],
           createdAt: new Date(conv.created_at),
-          pinned: conv.pinned,
+          pinned: pinnedIds.has(conv.id),
+          saved:  savedIds.has(conv.id),
         }));
         setChats(loadedChats);
         
@@ -293,18 +332,38 @@ function MainApp() {
     const chatId = sessionIdArg;
     if (!chatId) return;
 
-    const newChat: Chat = {
-      id: chatId,
-      title,
-      messages: [],
-      createdAt: new Date(),
-      pinned: false,
-    };
+    // Only update the title in the chats list.
+    // DO NOT call setActiveChatId / setCurrentSessionId / setActiveSessionId here —
+    // title generation is fire-and-forget and may complete *after* the user has already
+    // switched to a different session, which would corrupt the active-session state.
+    setChats(prev => {
+      const existing = prev.find(c => c.id === chatId);
+      if (existing) {
+        // Chat already in the list (added by handleSessionIdChange effect) — just update the title
+        return prev.map(c => c.id === chatId ? { ...c, title } : c);
+      }
+      // Not yet in list — add it (should rarely happen, but handle gracefully)
+      return [...prev, {
+        id: chatId,
+        title,
+        messages: [],
+        createdAt: new Date(),
+        pinned: false,
+      }];
+    });
+  };
 
-    setChats(prev => [newChat, ...prev]);
-    setActiveChatId(chatId);
-    setCurrentSessionId(chatId);
-    setActiveSessionId(chatId);
+  // Called by ChatWindow the moment it generates a session ID (first message send).
+  // Setting BOTH currentSessionId and activeChatId here ensures that:
+  //   • handleMessagesUpdate can update chats[session].messages during streaming
+  //   • the useEffect([activeChatId, currentMessages]) sync fires correctly
+  // Previously only setCurrentSessionId was called (via onSessionIdChange={setCurrentSessionId}),
+  // leaving activeChatId null until handleTitleGenerated fired — which could be seconds later.
+  const handleSessionIdChange = (sessionId: string) => {
+    setCurrentSessionId(sessionId);
+    setActiveChatId(sessionId);
+    setActiveSessionId(sessionId);
+    localStorage.setItem('aud-io-active-session', sessionId);
   };
 
   const handleNewChat = () => {
@@ -321,21 +380,38 @@ function MainApp() {
 
   const handleSelectChat = async (chatId: string) => {
     const chat = chats.find(c => c.id === chatId);
-    if (chat) {
-      setActiveChatId(chat.id);
-      setCurrentSessionId(chatId);
-      setActiveSessionId(chatId);
-      setCurrentChatTitle(chat.title);
-      if (chat.messages.length === 0) {
-        const conversation = await fetchConversation(chatId);
-        if (conversation) {
-          const messages = conversation.messages[0]?.role === 'system'
-            ? conversation.messages
-            : [{ role: 'system' as const, content: 'You are a helpful assistant.' }, ...conversation.messages];
-          setCurrentMessages(messages);
-          setChats(prev => prev.map(c => c.id === chatId ? { ...c, messages } : c));
-        }
+    if (!chat) return;
+
+    // Set all active-session state immediately so the UI responds at once
+    setCurrentSessionId(chatId);
+    setActiveChatId(chatId);
+    setActiveSessionId(chatId);
+    setCurrentChatTitle(chat.title);
+    localStorage.setItem('aud-io-active-session', chatId);
+
+    // ALWAYS fetch from SQLite — the in-memory cache is unreliable because:
+    //   • It is populated at session-start with only [system + user_question]
+    //   • The assistant reply is added later (during/after streaming) so the cache
+    //     may never have been updated with the full conversation.
+    try {
+      const conversation = await fetchConversation(chatId);
+      if (conversation && conversation.messages.length > 0) {
+        const messages = conversation.messages[0]?.role === 'system'
+          ? conversation.messages
+          : [{ role: 'system' as const, content: 'You are a helpful assistant.' }, ...conversation.messages];
+        setCurrentMessages(messages);
+        // Also update the in-memory cache so subsequent reads are fast
+        setChats(prev => prev.map(c => c.id === chatId ? { ...c, messages } : c));
+      } else if (chat.messages && chat.messages.length > 0) {
+        // SQLite returned nothing — fall back to whatever is cached (best-effort)
+        setCurrentMessages(chat.messages);
       } else {
+        setCurrentMessages([{ role: 'system', content: 'You are a helpful assistant.' }]);
+      }
+    } catch (error) {
+      console.error('Failed to fetch conversation from SQLite:', error);
+      // On network/backend error fall back to the in-memory cache
+      if (chat.messages && chat.messages.length > 0) {
         setCurrentMessages(chat.messages);
       }
     }
@@ -343,35 +419,84 @@ function MainApp() {
 
   const handleMessagesUpdate = (messages: Message[]) => {
     setCurrentMessages(messages);
-    if (activeChatId) {
+    // Use currentSessionId as primary — it's set by handleSessionIdChange at the moment
+    // the first message is sent, BEFORE streaming begins, so it's always available.
+    // Fall back to activeChatId for the restore-on-startup path.
+    const sessionId = currentSessionId || activeChatId;
+    if (sessionId) {
       setChats(prev => prev.map(chat =>
-        chat.id === activeChatId ? { ...chat, messages } : chat
+        chat.id === sessionId ? { ...chat, messages } : chat
       ));
     }
   };
 
-  const handlePinChat = async (chatId: string) => {
+  const handlePinChat = (chatId: string) => {
     const chat = chats.find(c => c.id === chatId);
     if (!chat) return;
     const newPinnedState = !(chat.pinned ?? false);
+    // Update React state (sidebar re-renders immediately)
     setChats(prev => prev.map(c => c.id === chatId ? { ...c, pinned: newPinnedState } : c));
-    const success = await updateConversationPinned(chatId, newPinnedState);
-    if (!success) {
-      setChats(prev => prev.map(c => c.id === chatId ? { ...c, pinned: !newPinnedState } : c));
-    }
+    // Persist to localStorage — no SQLite write
+    const ids = getPinnedIds();
+    if (newPinnedState) ids.add(chatId); else ids.delete(chatId);
+    setPinnedIds(ids);
   };
 
   const handleSaveChat = (chatId: string) => {
-    setChats(prev => prev.map(c =>
-      c.id === chatId ? { ...c, saved: !(c.saved ?? false) } : c
-    ));
+    const chat = chats.find(c => c.id === chatId);
+    if (!chat) return;
+    const newSavedState = !(chat.saved ?? false);
+    // Update React state (sidebar re-renders immediately)
+    setChats(prev => prev.map(c => c.id === chatId ? { ...c, saved: newSavedState } : c));
+    // Persist to localStorage — no SQLite write
+    const ids = getSavedIds();
+    if (newSavedState) ids.add(chatId); else ids.delete(chatId);
+    setSavedIds(ids);
   };
 
+  const [deletingChatId, setDeletingChatId] = useState<string | null>(null);
+  const deletingChatIdRef = useRef<string | null>(null);
+
   const handleDeleteChat = async (chatId: string) => {
-    const success = await deleteConversation(chatId);
-    if (!success) throw new Error('Failed to delete conversation from database');
-    setChats(prev => prev.filter(chat => chat.id !== chatId));
-    if (activeChatId === chatId) handleNewChat();
+    // Prevent concurrent deletions using ref for immediate check
+    if (deletingChatIdRef.current === chatId) {
+      console.log('Already deleting chat:', chatId);
+      return;
+    }
+    if (deletingChatIdRef.current) {
+      console.log('Another delete in progress:', deletingChatIdRef.current);
+      return;
+    }
+
+    deletingChatIdRef.current = chatId;
+    setDeletingChatId(chatId);
+
+    // Helper: remove deleted chat from localStorage pin/save state
+    const cleanupPinSave = () => {
+      const pIds = getPinnedIds(); pIds.delete(chatId); setPinnedIds(pIds);
+      const sIds = getSavedIds();  sIds.delete(chatId); setSavedIds(sIds);
+    };
+
+    try {
+      const success = await deleteConversation(chatId);
+      if (success) {
+        // 1. Remove from sidebar
+        setChats(prev => prev.filter(chat => chat.id !== chatId));
+        // 2. Clear chat window if this was the active conversation
+        if (activeChatId === chatId) handleNewChat();
+        // 3. Clean up pin/save localStorage entries
+        cleanupPinSave();
+      }
+    } catch (error) {
+      console.error('Delete chat error:', error);
+      // On error, still remove from UI to keep frontend in sync
+      setChats(prev => prev.filter(chat => chat.id !== chatId));
+      if (activeChatId === chatId) handleNewChat();
+      cleanupPinSave();
+    } finally {
+      deletingChatIdRef.current = null;
+      setDeletingChatId(null);
+    }
   };
 
   const handleDeleteConversationActivity = (id: string) => {
@@ -380,11 +505,14 @@ function MainApp() {
 
   const handleDeleteByAge = (olderThanDays: number) => {
     if (olderThanDays === 0) {
+      // Delete all conversations: SQLite, sidebar, and localStorage pin/save
       chats.forEach(chat => {
         deleteConversation(chat.id).catch(console.error);
       });
       setChats([]);
       handleNewChat();
+      setPinnedIds(new Set());
+      setSavedIds(new Set());
     } else {
       const cutoff = new Date();
       cutoff.setDate(cutoff.getDate() - olderThanDays);
@@ -393,6 +521,14 @@ function MainApp() {
         deleteConversation(chat.id).catch(console.error);
       });
       setChats(prev => prev.filter(c => new Date(c.createdAt) >= cutoff));
+      // Clean up localStorage pin/save for every deleted chat
+      const deletedIds = new Set(toDelete.map(c => c.id));
+      const pIds = getPinnedIds();
+      deletedIds.forEach(id => pIds.delete(id));
+      setPinnedIds(pIds);
+      const sIds = getSavedIds();
+      deletedIds.forEach(id => sIds.delete(id));
+      setSavedIds(sIds);
     }
   };
 
@@ -451,12 +587,12 @@ function MainApp() {
       default:
         return (
           <ChatWindow
-            key={activeChatId || 'new-chat'}
+            key={currentSessionId || 'new-chat'}
             messages={currentMessages}
             chatTitle={currentChatTitle}
             chatId={activeChatId}
             sessionId={currentSessionId}
-            onSessionIdChange={setCurrentSessionId}
+            onSessionIdChange={handleSessionIdChange}
             isPinned={chats.find(c => c.id === activeChatId)?.pinned}
             onMessagesUpdate={handleMessagesUpdate}
             onTitleGenerated={handleTitleGenerated}
@@ -494,6 +630,7 @@ function MainApp() {
         }}
         onPinChat={handlePinChat}
         onSaveChat={handleSaveChat}
+        deletingChatId={deletingChatId}
         onDeleteChat={(id) => handleDeleteChat(id).catch(console.error)}
         onOpenSettings={() => setActiveView('settings')}
         onOpenActivity={() => setActivityOpen(true)}

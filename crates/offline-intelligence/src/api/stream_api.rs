@@ -153,13 +153,14 @@ async fn process_file_attachments(
     // Match both [Attached: filename] and @filename patterns
     let attached_re = Regex::new(r"\[Attached: ([^\]]+)\]").unwrap();
     let at_re = Regex::new(r"@(\S+\.\w+)").unwrap();
-    
+
     let local_files = &state.shared_state.database_pool.local_files;
-    
+    let all_files = &state.shared_state.database_pool.all_files;
+
     for msg in messages.iter_mut() {
         if msg.role == "user" {
             let mut updated_content = msg.content.clone();
-            
+
             // Process [Attached: filename] patterns
             for cap in attached_re.captures_iter(&msg.content) {
                 if let Some(filename_match) = cap.get(1) {
@@ -169,10 +170,11 @@ async fn process_file_attachments(
                         &format!("[Attached: {}]", filename),
                         filename,
                         local_files,
+                        all_files,
                     ).await;
                 }
             }
-            
+
             // Process @filename patterns (reference to local files)
             for cap in at_re.captures_iter(&msg.content) {
                 if let Some(filename_match) = cap.get(1) {
@@ -182,61 +184,73 @@ async fn process_file_attachments(
                         &format!("@{}", filename),
                         filename,
                         local_files,
+                        all_files,
                     ).await;
                 }
             }
-            
+
             msg.content = updated_content;
         }
     }
-    
+
     Ok(())
 }
 
-/// Helper to replace a file reference with actual content
+/// Helper to replace a file reference with actual content.
+/// Tries all_files first (user local storage), then local_files, then filesystem fallback.
 async fn replace_file_reference(
     content: &str,
     marker: &str,
     filename: &str,
     local_files: &crate::memory_db::LocalFilesStore,
+    all_files: &crate::memory_db::AllFilesStore,
 ) -> String {
-    // Try to find file by name in database
-    match local_files.get_file_by_name(filename) {
-        Ok(file) => {
-            match local_files.get_file_content_string(file.id) {
-                Ok(file_content) => {
-                    let attachment_text = format!(
-                        "\n--- Content of file: {} ---\n{}\n--- End of file ---\n",
-                        filename, file_content
-                    );
-                    content.replace(marker, &attachment_text)
-                }
-                Err(_) => {
-                    let error_text = format!("\n[Note: Could not read file '{}'. File may be binary or corrupted.]", filename);
-                    content.replace(marker, &error_text)
-                }
+    // 1. Try all_files store first (primary user local storage)
+    if let Ok(file) = all_files.get_file_by_name(filename) {
+        match all_files.get_file_content_string(file.id) {
+            Ok(file_content) => {
+                let _ = all_files.record_access(file.id);
+                let attachment_text = format!(
+                    "\n--- Content of file: {} ---\n{}\n--- End of file ---\n",
+                    filename, file_content
+                );
+                return content.replace(marker, &attachment_text);
             }
+            Err(_) => {}
+        }
+    }
+
+    // 2. Try local_files store (legacy small-files store)
+    if let Ok(file) = local_files.get_file_by_name(filename) {
+        match local_files.get_file_content_string(file.id) {
+            Ok(file_content) => {
+                let attachment_text = format!(
+                    "\n--- Content of file: {} ---\n{}\n--- End of file ---\n",
+                    filename, file_content
+                );
+                return content.replace(marker, &attachment_text);
+            }
+            Err(_) => {}
+        }
+    }
+
+    // 3. Filesystem fallback for backward compatibility
+    let app_data_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Aud.io");
+    let file_path = app_data_dir.join(filename);
+
+    match crate::utils::extract_file_content(&file_path).await {
+        Ok(file_content) => {
+            let attachment_text = format!(
+                "\n--- Content of file: {} ---\n{}\n--- End of file ---\n",
+                filename, file_content
+            );
+            content.replace(marker, &attachment_text)
         }
         Err(_) => {
-            // Try filesystem fallback for backward compatibility
-            let app_data_dir = dirs::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("Aud.io");
-            let file_path = app_data_dir.join(filename);
-            
-            match crate::utils::extract_file_content(&file_path).await {
-                Ok(file_content) => {
-                    let attachment_text = format!(
-                        "\n--- Content of file: {} ---\n{}\n--- End of file ---\n",
-                        filename, file_content
-                    );
-                    content.replace(marker, &attachment_text)
-                }
-                Err(_) => {
-                    let error_text = format!("\n[Note: File '{}' not found in local files. Upload it first or check the filename.]", filename);
-                    content.replace(marker, &error_text)
-                }
-            }
+            let error_text = format!("\n[Note: File '{}' not found. Upload it to Local Storage first.]", filename);
+            content.replace(marker, &error_text)
         }
     }
 }

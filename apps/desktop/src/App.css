@@ -293,6 +293,33 @@
   border: 0.5px solid var(--chat-selected-border);
 }
 
+.sidebar-chat-item.deleting {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.sidebar-chat-deleting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 8px;
+}
+
+.sidebar-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-primary);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 [data-theme="dark"] .sidebar-chat-item.selected,
 :root .sidebar-chat-item.selected {
   --chat-selected-border: rgba(255, 255, 255, 0.5);

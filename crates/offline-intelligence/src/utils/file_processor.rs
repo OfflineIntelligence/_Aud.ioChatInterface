@@ -12,25 +12,43 @@ pub async fn extract_file_content(file_path: &Path) -> Result<String> {
         .unwrap_or_default();
 
     match file_ext.as_str() {
-        // Text files
-        "txt" | "md" | "json" | "yaml" | "yml" | "xml" | "csv" | "log" => {
-            extract_text_file(file_path).await
-        },
-        // Code files
-        "js" | "ts" | "jsx" | "tsx" | "py" | "java" | "cpp" | "c" | "cs" | 
-        "html" | "css" | "scss" | "go" | "rs" | "php" | "rb" | "swift" | 
-        "kt" | "scala" | "sql" | "sh" | "bat" | "ps1" | "dockerfile" | "env" => {
+        // Text and code files
+        "txt" | "md" | "markdown" | "json" | "jsonc" | "yaml" | "yml" | "xml" | "csv" | "log" | "tsv" |
+        "js" | "mjs" | "cjs" | "ts" | "jsx" | "tsx" | "py" | "pyw" | "java" | "cpp" | "cc" | "cxx" |
+        "c" | "h" | "hpp" | "cs" | "html" | "htm" | "css" | "scss" | "sass" | "less" | "go" | "rs" |
+        "php" | "rb" | "swift" | "kt" | "kts" | "scala" | "sql" | "sh" | "bash" | "zsh" | "fish" |
+        "bat" | "cmd" | "ps1" | "psm1" | "psd1" | "dockerfile" | "env" | "rtf" | "toml" | "ini" |
+        "cfg" | "conf" | "properties" | "gradle" | "cmake" | "makefile" | "mk" | "lua" | "r" | "m" |
+        "vim" | "el" | "lisp" | "clj" | "cljs" | "hs" | "elm" | "ex" | "exs" | "erl" | "hrl" |
+        "nim" | "zig" | "v" | "d" | "f" | "f90" | "jl" | "dart" | "groovy" | "pl" | "pm" |
+        "tcl" | "awk" | "sed" | "vue" | "svelte" | "astro" | "graphql" | "gql" | "proto" |
+        "tf" | "tfvars" | "hcl" | "nix" | "dhall" | "cabal" | "lock" | "sum" | "mod" => {
             extract_text_file(file_path).await
         },
         // Document files
         "pdf" => extract_pdf_content(file_path).await,
         "doc" | "docx" => extract_docx_content(file_path).await,
-        "rtf" => extract_text_file(file_path).await,
         "odt" => extract_odt_content(file_path).await,
         // Spreadsheet files
         "xls" | "xlsx" | "ods" => extract_xlsx_content(file_path).await,
         // Presentation files
         "ppt" | "pptx" | "odp" => extract_pptx_content(file_path).await,
+        // Image files
+        "ico" | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "tiff" | "tif" |
+        "heic" | "heif" | "avif" => {
+            let name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
+            Ok(format!("[Image file: {} — binary content, text extraction not applicable]", name))
+        },
+        // Archive files
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => {
+            let name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("archive");
+            Ok(format!("[Archive file: {} — cannot extract text from compressed archives]", name))
+        },
+        // Compiled/binary files
+        "exe" | "dll" | "so" | "dylib" | "bin" | "obj" | "o" | "wasm" => {
+            let name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("binary");
+            Ok(format!("[Binary file: {} — cannot extract text from compiled binary]", name))
+        },
         // Default to text extraction
         _ => {
             debug!("Unknown file type {}, attempting text extraction", file_ext);
@@ -44,22 +62,42 @@ pub async fn extract_content_from_bytes(bytes: &[u8], filename: &str) -> Result<
     let ext = filename.split('.').last().unwrap_or("").to_lowercase();
     
     match ext.as_str() {
-        // Text/code files - try UTF-8 decoding
-        "txt" | "md" | "json" | "yaml" | "yml" | "xml" | "csv" | "log" |
-        "js" | "ts" | "jsx" | "tsx" | "py" | "java" | "cpp" | "c" | "cs" | 
-        "html" | "css" | "scss" | "go" | "rs" | "php" | "rb" | "swift" | 
-        "kt" | "scala" | "sql" | "sh" | "bat" | "ps1" | "dockerfile" | "env" | "rtf" => {
+        // Text/code files - direct UTF-8 decoding
+        "txt" | "md" | "markdown" | "json" | "jsonc" | "yaml" | "yml" | "xml" | "csv" | "log" | "tsv" |
+        "js" | "mjs" | "cjs" | "ts" | "jsx" | "tsx" | "py" | "pyw" | "java" | "cpp" | "cc" | "cxx" |
+        "c" | "h" | "hpp" | "cs" | "html" | "htm" | "css" | "scss" | "sass" | "less" | "go" | "rs" |
+        "php" | "rb" | "swift" | "kt" | "kts" | "scala" | "sql" | "sh" | "bash" | "zsh" | "fish" |
+        "bat" | "cmd" | "ps1" | "psm1" | "psd1" | "dockerfile" | "env" | "rtf" | "toml" | "ini" |
+        "cfg" | "conf" | "properties" | "gradle" | "cmake" | "makefile" | "mk" | "lua" | "r" | "m" |
+        "vim" | "el" | "lisp" | "clj" | "cljs" | "hs" | "elm" | "ex" | "exs" | "erl" | "hrl" |
+        "nim" | "zig" | "v" | "d" | "f" | "f90" | "jl" | "dart" | "groovy" | "pl" | "pm" |
+        "tcl" | "awk" | "sed" | "vue" | "svelte" | "astro" | "graphql" | "gql" | "proto" |
+        "tf" | "tfvars" | "hcl" | "nix" | "dhall" | "cabal" | "lock" | "sum" | "mod" => {
             Ok(String::from_utf8_lossy(bytes).to_string())
         },
         // PDF files
         "pdf" => Ok(extract_pdf_from_bytes(bytes)),
         // Word documents
         "doc" | "docx" => Ok(extract_docx_from_bytes(bytes)),
+        "odt" => Ok(extract_odt_from_bytes(bytes)),
         // Spreadsheets
         "xls" | "xlsx" | "ods" => Ok(extract_xlsx_from_bytes(bytes, &ext)),
         // Presentations
         "ppt" | "pptx" | "odp" => Ok(extract_pptx_from_bytes(bytes)),
-        // Default - try text
+        // Image files - return descriptive note (binary, not text-extractable)
+        "ico" | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "tiff" | "tif" |
+        "heic" | "heif" | "avif" => {
+            Ok(format!("[Image file: {} — binary content, text extraction not applicable]", filename))
+        },
+        // Archive files
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => {
+            Ok(format!("[Archive file: {} — cannot extract text from compressed archives]", filename))
+        },
+        // Compiled/binary files
+        "exe" | "dll" | "so" | "dylib" | "bin" | "obj" | "o" | "wasm" => {
+            Ok(format!("[Binary file: {} — cannot extract text from compiled binary]", filename))
+        },
+        // Default - attempt UTF-8 text extraction (handles most source/config files)
         _ => {
             debug!("Unknown file type {}, attempting text extraction", ext);
             Ok(String::from_utf8_lossy(bytes).to_string())
