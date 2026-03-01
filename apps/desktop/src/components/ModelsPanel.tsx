@@ -2,13 +2,14 @@
 // Full-page model management view with source logos, inline download progress,
 // pause/stop/resume controls, sort/filter, and download notification bubble.
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Search, Download, Trash2, HardDrive, Cpu, Monitor, Database, ArrowLeft, RefreshCw, Pause, Play, Square, ChevronDown } from 'lucide-react';
 import { useNotificationHelpers } from '../contexts/NotificationContext';
 import { useAuth } from '../contexts/AuthContext';
 import { open } from '@tauri-apps/plugin-shell';
 import { getApiBaseSync } from '../api/backendUrl';
-import { saveApiKey as persistApiKey, getApiKey } from '../api/apiKeys';
+import { useApiKeys } from '../contexts/ApiKeyContext';
 
 // Helper function to check if backend is ready
 async function checkBackendReadiness(): Promise<boolean> {
@@ -329,18 +330,9 @@ export function showHuggingFaceApiKeyModal(
     const saveToken = () => {
       const token = inputField?.value.trim();
       if (token) {
-        // Save to localStorage (legacy compat + immediate state)
-        localStorage.setItem('aud-io-hf-token', token);
-
-        // Persist to encrypted backend DB (fire-and-forget)
-        persistApiKey('huggingface', token).catch(console.error);
-
-        // Update AuthContext
-        if (setApiKey) {
-          setApiKey('huggingface', token);
-        }
-
-        // Update parent component state
+        // The callback (onHfTokenChange) IS the ApiKeyContext setter when called from
+        // ModelsPanel/SettingsPanel — it handles OS keychain persistence, localStorage sync,
+        // and React state update all at once.
         if (onHfTokenChange) {
           onHfTokenChange(token);
         }
@@ -884,18 +876,8 @@ export function showOpenRouterApiKeyModal(
     const saveApiKeyHandler = () => {
       const apiKey = inputField?.value.trim();
       if (apiKey) {
-        // Save to localStorage (legacy compat)
-        localStorage.setItem('aud-io-openrouter-key', apiKey);
-
-        // Persist to encrypted backend DB (fire-and-forget)
-        persistApiKey('openrouter', apiKey).catch(console.error);
-
-        // Update AuthContext
-        if (setApiKey) {
-          setApiKey('openrouter', apiKey);
-        }
-
-        // Update parent component state
+        // The callback IS the ApiKeyContext setter — it handles OS keychain persistence,
+        // localStorage sync, and React state update across all panels simultaneously.
         if (onOpenRouterApiKeyChange) {
           onOpenRouterApiKeyChange(apiKey);
         }
@@ -906,7 +888,7 @@ export function showOpenRouterApiKeyModal(
         }
         document.removeEventListener('keydown', handleEscape);
 
-        // Notify caller that key was saved (e.g. to enable online mode)
+        // Notify caller that key was saved (e.g. to enable online mode).
         onComplete?.();
       } else {
         // Show error shake animation
@@ -1035,50 +1017,20 @@ const ModelsPanel: React.FC<{
   const [activeTab, setActiveTab] = useState<'installed' | 'available' | 'downloads'>('available');
   const [hardwareInfo, setHardwareInfo] = useState<HardwareInfo | null>(null);
   const [activeModelInfo, setActiveModelInfo] = useState<ActiveModelInfo | null>(null);
-  const [sortBy, setSortBy] = useState<SortOption>('name');
+  const [sortBy, setSortBy] = useState<SortOption>('compatibility');
   const [showSortDropdown, setShowSortDropdown] = useState(false);
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [showHfTokenInput, setShowHfTokenInput] = useState(false);
   const [engineAutoDownloading, setEngineAutoDownloading] = useState(false);
   const { showSuccess, showError, showDownload } = useNotificationHelpers();
-  const { user, setApiKey } = useAuth();
-  
-  const [hfToken, setHfToken] = useState<string>(() => {
-    // Get initial value from localStorage first
-    const storedToken = localStorage.getItem('aud-io-hf-token');
-    if (storedToken) return storedToken;
-    // Get from auth context if available
-    return user?.apiKeys?.huggingface || '';
-  });
-  
+  const { user } = useAuth();
+  // API keys come from the shared context — changes here are immediately visible
+  // in SettingsPanel (and vice versa).
+  const { hfToken, setHfToken, openRouterApiKey: ctxOpenRouterApiKey, setOpenRouterApiKey: ctxSetOpenRouterApiKey } = useApiKeys();
+
   // State for model removal confirmation
   const [showRemoveConfirmation, setShowRemoveConfirmation] = useState(false);
   const [modelToRemove, setModelToRemove] = useState<Model | null>(null);
-
-  // Sync hfToken with auth context when user changes
-  useEffect(() => {
-    if (user?.apiKeys?.huggingface && user.apiKeys.huggingface !== hfToken) {
-      setHfToken(user.apiKeys.huggingface);
-    }
-  }, [user, hfToken]);
-
-  // On mount: if no openRouterApiKey from props/localStorage, pull from encrypted backend DB
-  useEffect(() => {
-    if (!openRouterApiKey) {
-      getApiKey('openrouter').then(key => {
-        if (key) onOpenRouterApiKeyChange?.(key);
-      }).catch(console.error);
-    }
-    // Also load HF token from backend if missing
-    if (!hfToken) {
-      getApiKey('huggingface').then(key => {
-        if (key) {
-          setHfToken(key);
-          setApiKey?.('huggingface', key);
-        }
-      }).catch(console.error);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch data when panel opens and cleanup when closes
   useEffect(() => {
@@ -1148,7 +1100,7 @@ const ModelsPanel: React.FC<{
 
   useEffect(() => {
     if (isOpen && downloads.some(d => d.status === 'Downloading' || d.status === 'Starting' || d.status === 'Queued')) {
-      const interval = setInterval(fetchDownloads, 1000); // Poll every 1 second for active downloads
+      const interval = setInterval(fetchDownloads, 2000); // Poll every 2 seconds for active downloads
       return () => clearInterval(interval);
     }
     // If no active downloads, return empty cleanup function
@@ -1186,8 +1138,12 @@ const ModelsPanel: React.FC<{
       
       const response = await fetch(`${getApiBaseSync()}/models`);
       if (response.ok) {
-        const data = await response.json();
-        setModels(data);
+        const data: typeof models = await response.json();
+        // Deduplicate by model id — the registry can return the same entry
+        // multiple times after a restart (catalog + disk scan overlap).
+        const seen = new Set<string>();
+        const unique = data.filter(m => { if (seen.has(m.id)) return false; seen.add(m.id); return true; });
+        setModels(unique);
         // Do nothing if backend returns empty list, keep the models as received
       } else {
         setFetchError(`Backend returned HTTP ${response.status}. Make sure the backend is running.`);
@@ -1899,18 +1855,14 @@ const ModelsPanel: React.FC<{
 
   const handleSwitchModel = async (modelId: string, modelName: string) => {
     try {
-      // Check backend readiness before making request
-      if (!(await checkBackendReadiness())) {
-        showError('Backend Not Ready', `Please ensure the offline-intelligence service is started on ${getApiBaseSync()}.`);
-        return;
-      }
-      
+      // Background model switch — navigation has already happened instantly on button click.
+      // No readiness check needed here; this runs fire-and-forget while the user is in chat.
       const response = await fetch(`${getApiBaseSync()}/models/switch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model_id: modelId }),
       });
-      
+
       if (response.ok) {
         const data = await response.json();
 
@@ -1930,9 +1882,8 @@ const ModelsPanel: React.FC<{
           return;
         }
 
-        showSuccess('Model Switched', `Successfully switched to ${modelName}`);
-        // Optionally update the selected model in the UI
-        onSelectModel?.({ id: modelId, name: modelName, source: 'local' });
+        // Navigation already happened instantly — just confirm the model is ready
+        showSuccess('Model Ready', `${modelName} is ready`);
       } else if (response.status === 500) {
         // Check if backend is attempting automatic engine download
         const errorData = await response.json().catch(() => ({}));
@@ -2024,29 +1975,47 @@ const ModelsPanel: React.FC<{
 
   const sortModels = (list: Model[]) => {
     return [...list].sort((a, b) => {
-      // First sort by company priority
-      const priorityA = getCompanyPriority(a);
-      const priorityB = getCompanyPriority(b);
-      if (priorityA !== priorityB) {
-        return priorityA - priorityB;
-      }
-      
-      // Then apply selected sort
       switch (sortBy) {
-        case 'name': return a.name.localeCompare(b.name);
-        case 'size_asc': return a.size_bytes - b.size_bytes;
-        case 'size_desc': return b.size_bytes - a.size_bytes;
-        case 'compatibility':
-          return (b.compatibility_score ?? 0) - (a.compatibility_score ?? 0);
-        case 'source':
-          return (a.download_source || '').localeCompare(b.download_source || '');
-        case 'trending':
-          // Sort by popularity/downloads if available, fallback to name
-          return (b.tags.length || 0) - (a.tags.length || 0) || a.name.localeCompare(b.name);
-        case 'popularity':
-          // Sort by provider priority first, then by name
+        // ── Explicit user sorts — no company-priority interference ────────────
+
+        case 'name':
+          // Pure alphabetical — ignore provider
           return a.name.localeCompare(b.name);
-        default: return 0;
+
+        case 'size_asc':
+          // Smallest first; OpenRouter models have size_bytes=0 so they go last
+          if (a.size_bytes === 0 && b.size_bytes === 0) return a.name.localeCompare(b.name);
+          if (a.size_bytes === 0) return 1;
+          if (b.size_bytes === 0) return -1;
+          return a.size_bytes - b.size_bytes;
+
+        case 'size_desc':
+          // Largest first; same tie-break as above
+          if (a.size_bytes === 0 && b.size_bytes === 0) return a.name.localeCompare(b.name);
+          if (a.size_bytes === 0) return 1;
+          if (b.size_bytes === 0) return -1;
+          return b.size_bytes - a.size_bytes;
+
+        case 'compatibility': {
+          // Best Match: use hardware compatibility score for local models.
+          // OpenRouter models don't have a score — treat them as 0.5 (mid-range)
+          // so they interleave with local models instead of all sinking to the bottom.
+          const scoreA = a.compatibility_score ?? (a.download_source === 'openrouter' ? 0.5 : 0);
+          const scoreB = b.compatibility_score ?? (b.download_source === 'openrouter' ? 0.5 : 0);
+          if (scoreB !== scoreA) return scoreB - scoreA;
+          // Tie-break by company priority, then name
+          const pA = getCompanyPriority(a);
+          const pB = getCompanyPriority(b);
+          return pA !== pB ? pA - pB : a.name.localeCompare(b.name);
+        }
+
+        // ── Default / Trending — use company priority as primary sort ─────────
+        default: {
+          const pA = getCompanyPriority(a);
+          const pB = getCompanyPriority(b);
+          if (pA !== pB) return pA - pB;
+          return a.name.localeCompare(b.name);
+        }
       }
     });
   };
@@ -2090,12 +2059,10 @@ const ModelsPanel: React.FC<{
   const activeDownloadCount = downloads.filter(d => d.status === 'Downloading' || d.status === 'Starting').length;
 
   const sortOptions: { value: SortOption; label: string }[] = [
-    { value: 'popularity', label: 'Trending' },
-    { value: 'name', label: 'Name (A-Z)' },
-    { value: 'size_desc', label: 'Largest Models' },
-    { value: 'size_asc', label: 'Smallest Models' },
     { value: 'compatibility', label: 'Best Match' },
-    { value: 'source', label: 'Source' },
+    { value: 'name',          label: 'Name (A–Z)' },
+    { value: 'size_asc',      label: 'Smallest First' },
+    { value: 'size_desc',     label: 'Largest First' },
   ];
 
   return (
@@ -2264,28 +2231,12 @@ const ModelsPanel: React.FC<{
                   placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
                   value={hfToken || ''}
                   onChange={(e) => {
-                    const val = e.target.value;
-                    setHfToken(val);
-                    if (val.trim()) {
-                      localStorage.setItem('aud-io-hf-token', val.trim());
-                      setApiKey('huggingface', val.trim());
-                      persistApiKey('huggingface', val.trim()).catch(console.error);
-                    } else {
-                      localStorage.removeItem('aud-io-hf-token');
-                      setApiKey('huggingface', '');
-                    }
+                    // Context setter handles persistence (keychain + localStorage) for all listeners.
+                    setHfToken(e.target.value);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
-                      const val = (e.target as HTMLInputElement).value.trim();
-                      if (val) {
-                        localStorage.setItem('aud-io-hf-token', val);
-                        setApiKey('huggingface', val);
-                        persistApiKey('huggingface', val).catch(console.error);
-                      } else {
-                        localStorage.removeItem('aud-io-hf-token');
-                        setApiKey('huggingface', '');
-                      }
+                      setHfToken((e.target as HTMLInputElement).value.trim());
                     }
                   }}
                   style={{
@@ -2340,28 +2291,16 @@ const ModelsPanel: React.FC<{
                   placeholder="sk-or-v1-..."
                   value={openRouterApiKey || ''}
                   onChange={(e) => {
-                    const val = e.target.value;
-                    onOpenRouterApiKeyChange?.(val);
-                    if (val.trim()) {
-                      localStorage.setItem('aud-io-openrouter-key', val.trim());
-                      setApiKey('openrouter', val.trim());
-                      persistApiKey('openrouter', val.trim()).catch(console.error);
-                    } else {
-                      localStorage.removeItem('aud-io-openrouter-key');
-                      setApiKey('openrouter', '');
-                    }
+                    // Context setter handles persistence (keychain + localStorage) for all listeners.
+                    // Also call the prop callback so ChatWindow / App keeps its value in sync.
+                    ctxSetOpenRouterApiKey(e.target.value);
+                    onOpenRouterApiKeyChange?.(e.target.value);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       const val = (e.target as HTMLInputElement).value.trim();
-                      if (val) {
-                        localStorage.setItem('aud-io-openrouter-key', val);
-                        setApiKey('openrouter', val);
-                        persistApiKey('openrouter', val).catch(console.error);
-                      } else {
-                        localStorage.removeItem('aud-io-openrouter-key');
-                        setApiKey('openrouter', '');
-                      }
+                      ctxSetOpenRouterApiKey(val);
+                      onOpenRouterApiKeyChange?.(val);
                     }
                   }}
                   style={{
@@ -2464,11 +2403,10 @@ const ModelsPanel: React.FC<{
                         selectedModel={selectedModel}
                         onSelectModel={onSelectModel}
                         onToggleOnlineMode={onToggleOnlineMode}
-                        hasApiKey={!!openRouterApiKey}
+                        hasApiKey={!!(ctxOpenRouterApiKey || openRouterApiKey)}
                         activeModelInfo={activeModelInfo}
                         onSwitchModel={handleSwitchModel}
                         onOpenRouterApiKeyChange={onOpenRouterApiKeyChange}
-                        setApiKey={setApiKey}
                       />
                     );
                   })}
@@ -2674,6 +2612,51 @@ const ModelCard: React.FC<{
   onOpenRouterApiKeyChange?: (key: string) => void;
   setApiKey?: (provider: 'openrouter' | 'huggingface', key: string) => void;
 }> = ({ model, download, isInstalled, isAvailable, onInstall, onRemove, onPauseDownload, onResumeDownload, onCancelDownload, formatBytes, selectedModel, onSelectModel, onToggleOnlineMode, hasApiKey, activeModelInfo, onSwitchModel, onOpenRouterApiKeyChange, setApiKey }) => {
+  // Read from context so this card is always in sync with the shared key state.
+  const {
+    hfToken: ctxHfToken,
+    setHfToken: ctxSetHfToken,
+    setOpenRouterApiKey: ctxSetOpenRouterApiKey,
+  } = useApiKeys();
+
+  // Inline React modal state (replaces DOM-injected showOpenRouterApiKeyModal / showHuggingFaceApiKeyModal)
+  const [orModalStep, setOrModalStep] = useState<'none' | 'choice' | 'input'>('none');
+  const [orKeyInput, setOrKeyInput] = useState('');
+  const [orKeyError, setOrKeyError] = useState(false);
+  const orKeyRef = useRef<HTMLInputElement>(null);
+
+  const [hfModalStep, setHfModalStep] = useState<'none' | 'choice' | 'input'>('none');
+  const [hfTokenInput, setHfTokenInput] = useState('');
+  const [hfTokenError, setHfTokenError] = useState(false);
+  const hfTokenRef = useRef<HTMLInputElement>(null);
+
+  // Focus input when switching to the input step
+  useEffect(() => {
+    if (orModalStep === 'input') setTimeout(() => orKeyRef.current?.focus(), 50);
+  }, [orModalStep]);
+  useEffect(() => {
+    if (hfModalStep === 'input') setTimeout(() => hfTokenRef.current?.focus(), 50);
+  }, [hfModalStep]);
+
+  const closeOrModal = () => { setOrModalStep('none'); setOrKeyInput(''); setOrKeyError(false); };
+  const closeHfModal = () => { setHfModalStep('none'); setHfTokenInput(''); setHfTokenError(false); };
+
+  const saveOrKey = () => {
+    const key = orKeyInput.trim();
+    if (!key) { setOrKeyError(true); setTimeout(() => setOrKeyError(false), 1000); return; }
+    ctxSetOpenRouterApiKey(key);
+    onOpenRouterApiKeyChange?.(key);
+    closeOrModal();
+  };
+
+  const saveHfToken = () => {
+    const token = hfTokenInput.trim();
+    if (!token) { setHfTokenError(true); setTimeout(() => setHfTokenError(false), 1000); return; }
+    ctxSetHfToken(token);
+    closeHfModal();
+    onInstall(model);
+  };
+
   const isOpenRouter = model.download_source === 'openrouter';
   const modelIdClean = isOpenRouter
     ? (model.id.startsWith('openrouter:') ? model.id.slice(11) : model.id)
@@ -2698,6 +2681,7 @@ const ModelCard: React.FC<{
   };
   
   return (
+    <>
     <div style={{
       background: 'rgba(255, 255, 255, 0.05)',
       backdropFilter: 'blur(10px)',
@@ -2886,7 +2870,9 @@ const ModelCard: React.FC<{
                 onClick={() => {
                   // Switch to offline mode since we're selecting a local model
                   onToggleOnlineMode?.(false);
-                  // This will call onSwitchModel internally and navigate to chat view
+                  // Navigate to chat instantly — model initialises in the background
+                  onSelectModel?.({ id: model.id, name: model.name, source: 'local' });
+                  // Fire-and-forget: kick off backend model loading while user is already in chat
                   onSwitchModel?.(model.id, model.name);
                 }}
                 style={{
@@ -2918,8 +2904,7 @@ const ModelCard: React.FC<{
             <button
               onClick={() => {
                 if (!hasApiKey) {
-                  // Show the OpenRouter API key modal with two-step flow
-                  showOpenRouterApiKeyModal(onOpenRouterApiKeyChange, setApiKey);
+                  setOrModalStep('choice');
                   return;
                 }
                 onSelectModel?.({ id: modelIdClean, name: model.name, source: 'openrouter' });
@@ -2945,21 +2930,9 @@ const ModelCard: React.FC<{
               onClick={() => {
                 // Check if this is a HuggingFace model that might require authentication
                 if (model.download_source === 'huggingface') {
-                  // Check if we have a HuggingFace token available
-                  const hfToken = localStorage.getItem('aud-io-hf-token');
-                  if (!hfToken) {
-                    // Use the new two-step modal with back button
-                    showHuggingFaceApiKeyModal(
-                      (_token) => {
-                        // Token was saved, now proceed with installation
-                        onInstall(model);
-                      },
-                      setApiKey,
-                      () => {
-                        // onComplete callback - proceed with installation after token is saved
-                        onInstall(model);
-                      }
-                    );
+                  // Use context value — always up to date, no stale localStorage reads.
+                  if (!ctxHfToken) {
+                    setHfModalStep('choice');
                   } else {
                     // Token exists, proceed with installation
                     onInstall(model);
@@ -3001,6 +2974,127 @@ const ModelCard: React.FC<{
         </div>
       )}
     </div>
+
+      {/* ── OpenRouter API Key Modal (React portal — always inside Tauri webview) ── */}
+      {orModalStep !== 'none' && createPortal(
+        <div
+          style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.55)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000, fontFamily: 'sans-serif' }}
+          onClick={(e) => { if (e.target === e.currentTarget) closeOrModal(); }}
+        >
+          <div style={{ background: 'white', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'black', position: 'relative' }}>
+            {/* Close */}
+            <button onClick={closeOrModal} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
+            {orModalStep === 'choice' && (
+              <>
+                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 12, textAlign: 'center', fontSize: 18 }}>OpenRouter API Key Needed</h3>
+                <p style={{ color: '#374151', textAlign: 'center', fontSize: 14, marginBottom: 20 }}>Access powerful AI models by adding your OpenRouter API key.</p>
+                <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                  <button
+                    onClick={() => { open('https://openrouter.ai/keys'); closeOrModal(); }}
+                    style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                    onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
+                    onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                  >Create API Key</button>
+                  <button
+                    onClick={() => setOrModalStep('input')}
+                    style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                    onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
+                    onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                  >Enter Existing Key</button>
+                </div>
+              </>
+            )}
+            {orModalStep === 'input' && (
+              <>
+                {/* Back */}
+                <button onClick={() => setOrModalStep('choice')} style={{ position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>←</button>
+                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 10, textAlign: 'center', fontSize: 18 }}>Enter OpenRouter API Key</h3>
+                <p style={{ color: '#374151', textAlign: 'center', fontSize: 13, marginBottom: 16 }}>
+                  Paste your key below. Get one at{' '}
+                  <a href="#" onClick={(e) => { e.preventDefault(); open('https://openrouter.ai/keys'); }} style={{ color: '#2563eb', textDecoration: 'none' }}>openrouter.ai/keys</a>
+                </p>
+                <input
+                  ref={orKeyRef}
+                  type="password"
+                  placeholder="sk-or-v1-..."
+                  value={orKeyInput}
+                  onChange={(e) => setOrKeyInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && saveOrKey()}
+                  style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${orKeyError ? '#ef4444' : '#d1d5db'}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 12, outline: 'none' }}
+                />
+                <button
+                  onClick={saveOrKey}
+                  style={{ width: '100%', padding: '11px 16px', background: '#000', color: 'white', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}
+                  onMouseOver={(e) => { e.currentTarget.style.background = '#1e40af'; }}
+                  onMouseOut={(e) => { e.currentTarget.style.background = '#000'; }}
+                >Save API Key</button>
+              </>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* ── HuggingFace Token Modal (React portal — always inside Tauri webview) ── */}
+      {hfModalStep !== 'none' && createPortal(
+        <div
+          style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.55)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000, fontFamily: 'sans-serif' }}
+          onClick={(e) => { if (e.target === e.currentTarget) closeHfModal(); }}
+        >
+          <div style={{ background: 'white', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'black', position: 'relative' }}>
+            {/* Close */}
+            <button onClick={closeHfModal} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
+            {hfModalStep === 'choice' && (
+              <>
+                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 12, textAlign: 'center', fontSize: 18 }}>HuggingFace Token Needed</h3>
+                <p style={{ color: '#374151', textAlign: 'center', fontSize: 14, marginBottom: 20 }}>Access gated models by adding your HuggingFace token.</p>
+                <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                  <button
+                    onClick={() => { open('https://huggingface.co/settings/tokens'); closeHfModal(); }}
+                    style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                    onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
+                    onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                  >Create API Key</button>
+                  <button
+                    onClick={() => setHfModalStep('input')}
+                    style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                    onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
+                    onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                  >Enter Existing Key</button>
+                </div>
+              </>
+            )}
+            {hfModalStep === 'input' && (
+              <>
+                {/* Back */}
+                <button onClick={() => setHfModalStep('choice')} style={{ position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>←</button>
+                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 10, textAlign: 'center', fontSize: 18 }}>Enter HuggingFace Token</h3>
+                <p style={{ color: '#374151', textAlign: 'center', fontSize: 13, marginBottom: 16 }}>
+                  Paste your token below. Get one at{' '}
+                  <a href="#" onClick={(e) => { e.preventDefault(); open('https://huggingface.co/settings/tokens'); }} style={{ color: '#2563eb', textDecoration: 'none' }}>huggingface.co/settings/tokens</a>
+                </p>
+                <input
+                  ref={hfTokenRef}
+                  type="password"
+                  placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                  value={hfTokenInput}
+                  onChange={(e) => setHfTokenInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && saveHfToken()}
+                  style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${hfTokenError ? '#ef4444' : '#d1d5db'}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 12, outline: 'none' }}
+                />
+                <button
+                  onClick={saveHfToken}
+                  style={{ width: '100%', padding: '11px 16px', background: '#000', color: 'white', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}
+                  onMouseOver={(e) => { e.currentTarget.style.background = '#1e40af'; }}
+                  onMouseOut={(e) => { e.currentTarget.style.background = '#000'; }}
+                >Save Token</button>
+              </>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
   );
 };
 

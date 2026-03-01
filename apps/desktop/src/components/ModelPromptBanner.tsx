@@ -1,12 +1,13 @@
 // ModelPromptBanner.tsx
 // Displays a prompt banner when no model is selected, guiding users to select a model
 
-import { showOpenRouterApiKeyModal } from './ModelsPanel';
 import { useTheme } from '../contexts/ThemeContext';
 
 interface ModelPromptBannerProps {
     isOnlineMode: boolean;
     hasApiKey: boolean;
+    /** True when at least one local model is installed (offline readiness). */
+    hasLocalModel?: boolean;
     onOpenModels: (focusApiKey?: boolean, focusHfToken?: boolean) => void;
     onToggleOnlineMode?: (online: boolean) => void;
     onOpenRouterApiKeyChange?: (key: string) => void;
@@ -16,6 +17,7 @@ interface ModelPromptBannerProps {
 export function ModelPromptBanner({
     isOnlineMode,
     hasApiKey,
+    hasLocalModel = false,
     onOpenModels,
     onToggleOnlineMode,
     onOpenRouterApiKeyChange,
@@ -49,22 +51,35 @@ export function ModelPromptBanner({
             }}
         >
             {/* Header with mode indicator */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span
-                        style={{
-                            width: '10px',
-                            height: '10px',
-                            borderRadius: '50%',
-                            backgroundColor: isOnlineMode ? '#22C55E' : '#22C55E',
-                            boxShadow: `0 0 8px ${isOnlineMode ? 'rgba(3, 115, 29, 0.5)' : 'rgba(34, 197, 94, 0.5)'}`,
-                        }}
-                    />
-                    <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                        {isOnlineMode ? 'Online Mode' : 'Offline Mode'}. No Model Selected
-                    </span>
-                </div>
-            </div>
+            {(() => {
+                // Dot is green only when the current mode is fully ready.
+                // Online → green if API key exists; red otherwise.
+                // Offline → green if at least one local model is installed; red otherwise.
+                const isReady  = isOnlineMode ? hasApiKey : hasLocalModel;
+                const dotColor = isReady ? '#22C55E' : '#EF4444';
+                const glowRgba = isReady
+                    ? 'rgba(34, 197, 94, 0.65)'
+                    : 'rgba(239, 68, 68, 0.65)';
+                return (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span
+                                style={{
+                                    width: '10px',
+                                    height: '10px',
+                                    borderRadius: '50%',
+                                    backgroundColor: dotColor,
+                                    boxShadow: `0 0 8px ${glowRgba}`,
+                                    flexShrink: 0,
+                                }}
+                            />
+                            <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                {isOnlineMode ? 'Online Mode' : 'Offline Mode'}. No Model Selected
+                            </span>
+                        </div>
+                    </div>
+                );
+            })()}
 
             {/* Content based on mode */}
             {isOnlineMode ? (
@@ -100,14 +115,7 @@ export function ModelPromptBanner({
                             Switch to Offline
                         </button>
                         <button
-                            onClick={() => {
-                                if (hasApiKey) {
-                                    onOpenModels(true, false);
-                                } else {
-                                    // Show the OpenRouter API key modal with two-step flow
-                                    showOpenRouterApiKeyModal(onOpenRouterApiKeyChange, setApiKey);
-                                }
-                            }}
+                            onClick={() => onOpenModels(true, false)}
                             style={{
                                 flex: '1 1 auto',
                                 fontSize: '13px',
@@ -122,10 +130,16 @@ export function ModelPromptBanner({
                                 alignItems: 'center',
                                 justifyContent: 'center',
                                 gap: '6px',
-                                transition: 'background-color 0.2s',
+                                transition: 'all 0.2s',
                             }}
-                            onMouseOver={(e) => (e.currentTarget.style.backgroundColor = hoverBgColor)} /* Theme-aware hover */
-                            onMouseOut={(e) => (e.currentTarget.style.backgroundColor = '#1e40af')} /* Dark blue */
+                            onMouseOver={(e) => {
+                                e.currentTarget.style.backgroundColor = hoverBgColor;
+                                e.currentTarget.style.color = hoverTextColor;
+                            }}
+                            onMouseOut={(e) => {
+                                e.currentTarget.style.backgroundColor = '#1e40af';
+                                e.currentTarget.style.color = 'white';
+                            }}
                         >
                             <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -165,7 +179,7 @@ export function ModelPromptBanner({
                             Try Online Mode
                         </button>
                         <button
-                            onClick={() => onOpenModels(false, true)} /* Focus on HuggingFace token, not API key */
+                            onClick={() => onOpenModels(false, true)}
                             style={{
                                 flex: '1 1 auto',
                                 fontSize: '13px',
@@ -180,10 +194,16 @@ export function ModelPromptBanner({
                                 alignItems: 'center',
                                 justifyContent: 'center',
                                 gap: '6px',
-                                transition: 'background-color 0.2s',
+                                transition: 'all 0.2s',
                             }}
-                            onMouseOver={(e) => (e.currentTarget.style.backgroundColor = hoverBgColor)} /* Theme-aware hover */
-                            onMouseOut={(e) => (e.currentTarget.style.backgroundColor = '#1e40af')} /* Dark blue */
+                            onMouseOver={(e) => {
+                                e.currentTarget.style.backgroundColor = hoverBgColor;
+                                e.currentTarget.style.color = hoverTextColor;
+                            }}
+                            onMouseOut={(e) => {
+                                e.currentTarget.style.backgroundColor = '#1e40af';
+                                e.currentTarget.style.color = 'white';
+                            }}
                         >
                             <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />

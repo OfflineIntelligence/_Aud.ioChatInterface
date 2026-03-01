@@ -1,3 +1,8 @@
+# Environment variables - contains secrets, never commit
+.env
+.env.local
+.env.*.local
+
 # Runtime resources (binaries + models) - never committed, populated at runtime or via UI download
 crates/offline-intelligence/Resources/
 

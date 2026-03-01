@@ -8,6 +8,7 @@ export interface User {
   email: string;
   isAuthenticated: boolean;
   emailVerified: boolean;
+  avatar_url?: string;
   apiKeys: {
     openrouter?: string;
     huggingface?: string;
@@ -97,43 +98,59 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const initializeAuth = async () => {
       setIsLoading(true);
-      
+
       const stored = localStorage.getItem(STORAGE_KEY);
       const token = getStoredToken();
-      
-      if (stored && token) {
+
+      // Step 1: Restore from localStorage immediately so the UI never flickers
+      // to "Sign in with Google" on every app start.
+      let cachedUser: User | null = null;
+      if (stored) {
         try {
           const parsed = JSON.parse(stored);
-          
-          const tokenResponse = await getCurrentUser(token);
-          if (tokenResponse && tokenResponse.success && tokenResponse.user) {
-            setUser({
-              id: tokenResponse.user.id,
-              name: tokenResponse.user.name,
-              email: tokenResponse.user.email,
-              isAuthenticated: true,
-              emailVerified: tokenResponse.user.email_verified,
-              apiKeys: parsed.apiKeys || {},
-            });
-          } else {
-            localStorage.removeItem(STORAGE_KEY);
-            clearStoredAuth();
+          if (parsed?.isAuthenticated) {
+            cachedUser = { ...parsed };
+            setUser(cachedUser);          // instant — no waiting for backend
           }
         } catch (e) {
-          console.error('Failed to parse stored user:', e);
-          localStorage.removeItem(STORAGE_KEY);
-          clearStoredAuth();
-        }
-      } else if (stored) {
-        try {
-          const parsed = JSON.parse(stored);
-          setUser(parsed);
-        } catch (e) {
-          console.error('Failed to parse stored user:', e);
+          console.error('Failed to parse stored user profile:', e);
           localStorage.removeItem(STORAGE_KEY);
         }
       }
-      
+
+      // Step 2: If we also have a JWT, verify it against the backend.
+      // This refreshes the profile with authoritative server data.
+      // On network error (backend not ready) we keep the cached user — only an
+      // explicit rejection (non-null response with success=false) triggers a logout.
+      if (token && cachedUser) {
+        try {
+          const tokenResponse = await getCurrentUser(token);
+
+          if (tokenResponse && tokenResponse.success && tokenResponse.user) {
+            // Backend confirmed token — refresh profile with server data
+            setUser(prev => ({
+              ...prev!,
+              id:            tokenResponse.user!.id,
+              name:          tokenResponse.user!.name,
+              email:         tokenResponse.user!.email,
+              isAuthenticated: true,
+              emailVerified: tokenResponse.user!.email_verified,
+              // Preserve avatar_url from cache if backend doesn't echo it back
+              avatar_url:    (tokenResponse.user as any).avatar_url ?? prev?.avatar_url,
+            }));
+          } else if (tokenResponse !== null) {
+            // Backend explicitly rejected the token — log out
+            setUser(null);
+            localStorage.removeItem(STORAGE_KEY);
+            clearStoredAuth();
+          }
+          // tokenResponse === null means a network error; keep cached user.
+        } catch (e) {
+          // Any unexpected error — keep cached user, do not log out
+          console.error('Token verification error (keeping cached session):', e);
+        }
+      }
+
       setIsLoaded(true);
       setIsLoading(false);
     };

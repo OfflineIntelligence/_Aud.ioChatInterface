@@ -6,9 +6,10 @@ import { X, Send, MessageSquare } from 'lucide-react';
 interface FeedbackPopupProps {
   isOpen: boolean;
   onClose: () => void;
+  onSuccess?: () => void;
 }
 
-const FeedbackPopup: React.FC<FeedbackPopupProps> = ({ isOpen, onClose }) => {
+const FeedbackPopup: React.FC<FeedbackPopupProps> = ({ isOpen, onClose, onSuccess }) => {
   const { user } = useAuth();
   const [name, setName] = useState(user?.name || '');
   const [email, setEmail] = useState(user?.email || '');
@@ -44,6 +45,7 @@ const FeedbackPopup: React.FC<FeedbackPopupProps> = ({ isOpen, onClose }) => {
 
       if (response.ok) {
         setIsSubmitted(true);
+        onSuccess?.();
         setTimeout(() => {
           onClose();
           // Reset form after closing
@@ -66,8 +68,9 @@ const FeedbackPopup: React.FC<FeedbackPopupProps> = ({ isOpen, onClose }) => {
     <div
       style={{
         position: 'fixed',
-        bottom: '24px',
+        top: '50%',
         right: '24px',
+        transform: 'translateY(-50%)',
         zIndex: 9999,
         maxWidth: '380px',
         width: '100%',

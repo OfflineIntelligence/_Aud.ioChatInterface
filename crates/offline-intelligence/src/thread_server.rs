@@ -43,15 +43,17 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
 
     info!("Starting thread-based server architecture");
 
-    // Initialize database - use user data directory for persistence across updates
-    // This ensures data survives app updates and works on Windows where Program Files is read-only
+    // ── Phase 1: Fast setup (database + managers) ─────────────────────────────
+    // Everything here finishes in < 10 seconds so the port can be bound and
+    // communicated to the main thread well within its 60-second timeout.
+
+    // Initialize database
     let memory_db_path = dirs::data_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
         .join("Aud.io")
         .join("data")
         .join("memory.db");
 
-    // Ensure the data directory exists
     if let Some(parent) = memory_db_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             warn!("Failed to create data directory {:?}: {}", parent, e);
@@ -71,35 +73,30 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
         }
     };
 
-    // Initialize shared state (creates LLM worker internally with backend_url)
+    // Shared state
     let mut shared_state = SharedState::new(cfg.clone(), memory_database.clone())?;
 
-    // Initialize Model Manager
+    // Model Manager (catalog scan, usually < 3 s)
     info!("📦 Initializing Model Manager");
     match ModelManager::new() {
         Ok(model_manager) => {
             let model_manager_arc = Arc::new(model_manager);
-            // Initialize the model manager with hardware-aware compatibility scoring
             if let Err(e) = model_manager_arc.initialize(&cfg).await {
                 warn!("⚠️  Model manager initialization failed: {}", e);
-                // Still add the model manager even if initialization fails to have default catalog
                 shared_state.model_manager = Some(model_manager_arc);
             } else {
                 info!("✅ Model manager initialized successfully");
                 shared_state.model_manager = Some(model_manager_arc);
             }
         }
-        Err(e) => {
-            warn!("⚠️  Failed to create model manager: {}", e);
-        }
+        Err(e) => warn!("⚠️  Failed to create model manager: {}", e),
     }
 
-    // Initialize Engine Manager
+    // Engine Manager (filesystem scan, usually < 1 s)
     info!("⚙️  Initializing Engine Manager");
     match crate::engine_management::EngineManager::new() {
         Ok(engine_manager) => {
             let engine_manager_arc = Arc::new(engine_manager);
-
             match engine_manager_arc.initialize(&cfg).await {
                 Ok(true) => {
                     info!("✅ Engine manager initialized with engine ready");
@@ -110,17 +107,13 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
                     info!("⚠️  Engine manager initialized but no engine available yet");
                     shared_state.engine_manager = Some(engine_manager_arc.clone());
                     shared_state.engine_available.store(false, std::sync::atomic::Ordering::Relaxed);
-
-                    // Spawn background task to retry engine download
+                    // Retry in background
                     let engine_mgr = engine_manager_arc.clone();
                     let engine_available = shared_state.engine_available.clone();
                     tokio::spawn(async move {
-                        // Retry every 30 seconds with exponential backoff up to 5 minutes
                         let mut retry_interval = 30u64;
                         loop {
                             tokio::time::sleep(std::time::Duration::from_secs(retry_interval)).await;
-
-                            info!("Retrying engine download (background task)...");
                             match engine_mgr.ensure_engine_available().await {
                                 Ok(true) => {
                                     info!("✅ Engine downloaded successfully in background");
@@ -128,8 +121,8 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
                                     break;
                                 }
                                 Ok(false) | Err(_) => {
-                                    warn!("Engine download retry failed, will try again in {} seconds", retry_interval);
-                                    retry_interval = std::cmp::min(retry_interval * 2, 300); // Cap at 5 minutes
+                                    warn!("Engine download retry failed, next in {}s", retry_interval);
+                                    retry_interval = (retry_interval * 2).min(300);
                                 }
                             }
                         }
@@ -150,343 +143,255 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
 
     let shared_state = Arc::new(shared_state);
 
-    // Initialize Runtime Manager for multi-format model support
-    info!("🚀 Initializing Runtime Manager for multi-format model support");
-    let runtime_manager = Arc::new(crate::model_runtime::RuntimeManager::new());
-
-    // CRITICAL: Wait for runtime initialization BEFORE starting HTTP server
-    // This prevents 502 errors by ensuring llama-server is ready to accept requests
-    info!("⏳ Waiting for runtime initialization to complete...");
-    
-    // Configure the runtime based on detected model format
-    let runtime_config = crate::model_runtime::RuntimeConfig {
-        model_path: std::path::PathBuf::from(&cfg.model_path),
-        format: crate::model_runtime::ModelFormat::GGUF, // Will be auto-detected
-        host: cfg.llama_host.clone(),
-        port: cfg.llama_port,
-        context_size: cfg.ctx_size,
-        batch_size: cfg.batch_size,
-        threads: cfg.threads,
-        gpu_layers: cfg.gpu_layers,
-        runtime_binary: if cfg.llama_bin.is_empty() { None } else { Some(std::path::PathBuf::from(&cfg.llama_bin)) },
-        extra_config: serde_json::json!({}),
-    };
-
-    // BLOCKING runtime initialization - wait for engine to be ready before starting HTTP server
-    // This prevents race conditions and ensures llama-server is available when UI loads
-    info!("⏳ Waiting for runtime to be ready...");
-
-    let mut runtime_initialized = false;
-
-    if let Some(ref engine_manager) = shared_state.engine_manager {
-        // Check if there's a default engine installed
-        let registry = engine_manager.registry.read().await;
-        if let Some(default_engine) = registry.get_default_engine_binary_path() {
-            drop(registry); // Release the read lock
-            info!("✅ Default engine found: {}", default_engine.display());
-
-            // Store runtime manager before initialization
-            if let Err(e) = shared_state.set_runtime_manager(runtime_manager.clone()) {
-                error!("❌ Failed to set runtime manager in shared state: {}", e);
-            }
-
-            // CRITICAL: Link runtime manager to LLM worker IMMEDIATELY
-            // This allows health check to properly report engine status even without a model loaded
-            shared_state.llm_worker.set_runtime_manager(runtime_manager.clone());
-            info!("🔗 LLM worker linked to runtime manager");
-
-            // Try to load last used model instead of config model (which is often empty)
-            let should_auto_load = if cfg.model_path.is_empty() {
-                // Try to load last used model from persistent storage
-                if let Some(data_dir) = dirs::data_dir() {
-                    let last_model_path = data_dir.join("Aud.io").join("last_model.txt");
-                    if let Ok(last_model_id) = std::fs::read_to_string(&last_model_path) {
-                        let last_model_id = last_model_id.trim();
-                        info!("🔄 Found last used model: {}", last_model_id);
-
-                        // Attempt to load this model automatically
-                        if let Some(ref model_manager) = shared_state.model_manager {
-                            // Get model info from registry
-                            let registry = model_manager.registry.read().await;
-                            if let Some(model_info) = registry.get_model(last_model_id) {
-                                // Check if model is installed
-                                if model_info.status == crate::model_management::registry::ModelStatus::Installed {
-                                    // Get model path
-                                    if let Some(ref filename) = model_info.filename {
-                                        let model_path_for_runtime = model_manager.storage.model_path(last_model_id, filename);
-
-                                        if model_path_for_runtime.exists() {
-                                            info!("✅ Auto-loading last used model from: {}", model_path_for_runtime.display());
-                                            drop(registry); // Release lock before async operations
-
-                                            // Update runtime config with the last used model
-                                            let mut updated_config = runtime_config.clone();
-                                            updated_config.model_path = model_path_for_runtime;
-                                            updated_config.runtime_binary = Some(default_engine.clone());
-
-                                            // Store runtime manager and link to LLM worker before initialization
-                                            if let Err(e) = shared_state.set_runtime_manager(runtime_manager.clone()) {
-                                                error!("❌ Failed to set runtime manager: {}", e);
-                                            }
-                                            shared_state.llm_worker.set_runtime_manager(runtime_manager.clone());
-
-                                            // Initialize with last used model
-                                            match runtime_manager.initialize_auto(updated_config).await {
-                                                Ok(base_url) => {
-                                                    info!("✅ Last used model auto-loaded at {}", base_url);
-                                                    match runtime_manager.health_check().await {
-                                                        Ok(status) => {
-                                                            info!("✅ Runtime health check passed: {}", status);
-                                                            runtime_initialized = true;
-                                                        }
-                                                        Err(e) => {
-                                                            warn!("⚠️  Runtime health check failed after auto-load: {}", e);
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    warn!("⚠️  Failed to auto-load last used model: {}", e);
-                                                }
-                                            }
-
-                                            // Skip the manual load block below
-                                            false
-                                        } else {
-                                            drop(registry);
-                                            warn!("⚠️  Last used model file not found: {}", model_path_for_runtime.display());
-                                            false
-                                        }
-                                    } else {
-                                        drop(registry);
-                                        warn!("⚠️  Last used model has no filename in registry");
-                                        false
-                                    }
-                                } else {
-                                    drop(registry);
-                                    info!("ℹ️  Last used model is not installed - user will need to activate a model");
-                                    false
-                                }
-                            } else {
-                                drop(registry);
-                                warn!("⚠️  Last used model not found in registry: {}", last_model_id);
-                                false
-                            }
-                        } else {
-                            info!("ℹ️  Model manager not available - skipping auto-load");
-                            false
-                        }
-                    } else {
-                        info!("ℹ️  No last used model found - user will need to activate a model");
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                // Config has a model path - try to use it
-                true
-            };
-
-            if !should_auto_load {
-                info!("⏩ Skipping manual load - either auto-loaded or will wait for user activation");
-                // Don't initialize runtime - either already done via auto-load or waiting for user
-            } else {
-                // Update the runtime config to use the default engine binary
-                let mut updated_config = runtime_config.clone();
-                updated_config.runtime_binary = Some(default_engine);
-
-                // BLOCKING initialization with 120 second timeout for llama-server health check
-                info!("🚀 Initializing runtime (this may take up to 2 minutes)...");
-                match runtime_manager.initialize_auto(updated_config).await {
-                Ok(base_url) => {
-                    info!("✅ Runtime initialized at {}", base_url);
-
-                    // Verify runtime is actually ready by performing health check
-                    match runtime_manager.health_check().await {
-                        Ok(status) => {
-                            info!("✅ Runtime health check passed: {}", status);
-
-                            // Link runtime manager to LLM worker
-                            shared_state.llm_worker.set_runtime_manager(runtime_manager.clone());
-                            info!("🔗 LLM worker linked to runtime");
-
-                            runtime_initialized = true;
-                        }
-                        Err(e) => {
-                            warn!("⚠️  Runtime health check failed: {}", e);
-                            warn!("   App will continue without runtime (online-only mode)");
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("⚠️  Runtime initialization failed: {}", e);
-                    warn!("   App will continue without runtime (online-only mode)");
-                }
-            }
-            } // End of should_auto_load else block
-        } else {
-            drop(registry); // Release the read lock
-            info!("⏳ No engine found - app will start in online-only mode");
-            info!("   Users can download an engine from the Engines panel");
-        }
-    } else {
-        info!("⏳ Engine manager not available - app will start in online-only mode");
-    }
-
-    // Mark initialization complete now that runtime check is done
-    shared_state.mark_initialization_complete();
-
-    if runtime_initialized {
-        info!("✅ Backend initialization complete with runtime ready");
-    } else {
-        info!("✅ Backend initialization complete (online-only mode)");
-    }
-
-    // Initialize workers
+    // Workers (fast construction)
     let _context_worker: Arc<ContextWorker> = Arc::new(ContextWorker::new(shared_state.clone()));
     let _cache_worker: Arc<CacheWorker> = Arc::new(CacheWorker::new(shared_state.clone()));
     let _database_worker: Arc<DatabaseWorker> = Arc::new(DatabaseWorker::new(shared_state.clone()));
     let _llm_worker = shared_state.llm_worker.clone();
 
-    // Initialize cache manager
+    // Cache manager
     let cache_manager = match crate::cache_management::create_default_cache_manager(
         crate::cache_management::KVCacheConfig::default(),
         memory_database.clone(),
     ) {
-        Ok(manager) => {
-            info!("Cache manager initialized successfully");
-            Some(Arc::new(manager))
-        }
-        Err(e) => {
-            warn!("Failed to initialize cache manager: {}, cache features disabled", e);
-            None
-        }
+        Ok(manager) => { info!("Cache manager initialized"); Some(Arc::new(manager)) }
+        Err(e) => { warn!("Cache manager failed: {}, disabled", e); None }
     };
-
-    // Initialize context orchestrator
-    let context_orchestrator = match crate::context_engine::create_default_orchestrator(
-        memory_database.clone(),
-    ).await {
-        Ok(mut orchestrator) => {
-            // Inject LLM worker so the orchestrator can generate query embeddings
-            // for semantic search when the hot KV cache doesn't have the answer.
-            orchestrator.set_llm_worker(shared_state.llm_worker.clone());
-            info!("Context orchestrator initialized with semantic search support");
-            Some(orchestrator)
-        }
-        Err(e) => {
-            warn!("Failed to initialize context orchestrator: {}. Memory features disabled.", e);
-            None
-        }
-    };
-
-    // Initialize thread pool
-    let thread_pool_config = ThreadPoolConfig::new(&cfg);
-    let mut thread_pool = ThreadPool::new(thread_pool_config, shared_state.clone());
-    thread_pool.start().await?;
-
-    // Update shared state with initialized components
     {
-        let mut cache_guard = shared_state.cache_manager.write()
+        let mut g = shared_state.cache_manager.write()
             .map_err(|_| anyhow::anyhow!("Failed to acquire cache manager write lock"))?;
-        *cache_guard = cache_manager;
-
-        // LLM runtime is now managed by RuntimeManager, no need to initialize here
-        // shared_state.initialize_llm_runtime()?;  // Removed - handled by RuntimeManager
+        *g = cache_manager;
     }
 
-    // Initialize embedding HNSW index from any previously stored embeddings
-    // This makes semantic search available immediately on startup.
+    // Embedding index (fast, reads disk)
     if let Err(e) = shared_state.database_pool.embeddings.initialize_index("llama-server") {
-        debug!("Embedding index init: {} (will build on first embedding store)", e);
+        debug!("Embedding index init: {} (will build on first store)", e);
     } else {
         info!("Embedding HNSW index loaded from existing data");
     }
 
-    // Set context orchestrator (tokio RwLock for async access from handlers)
-    {
-        let mut orch_guard = shared_state.context_orchestrator.write().await;
-        *orch_guard = context_orchestrator;
-    }
+    // Thread pool
+    let thread_pool_config = ThreadPoolConfig::new(&cfg);
+    let mut thread_pool = ThreadPool::new(thread_pool_config, shared_state.clone());
+    thread_pool.start().await?;
 
-    // Build the unified app state for the router
+    // ── Phase 2: Bind port immediately ────────────────────────────────────────
+    // Port is bound NOW, before any slow I/O, so the main thread's
+    // 60-second actual_port_rx timeout is satisfied within seconds.
+
     let unified_state = UnifiedAppState::new(shared_state.clone());
+    let app = build_compatible_router(unified_state);
 
-    // Runtime initialization moved to background task above
-    // Server starts immediately - runtime will become ready asynchronously
-    info!("✅ Backend HTTP server starting (runtime may still be initializing)...");
-
-    // Try to bind to the configured port, fall back to random port if in use
     let (listener, selected_port) = match try_bind_port(&cfg.api_host, cfg.api_port).await {
         Ok(listener) => {
-            let local_addr = listener.local_addr()?;
-            let port = local_addr.port();
-            info!("✅ HTTP server bound to {}:{}", local_addr.ip(), port);
-            // Communicate the port back to main thread
-            if let Some(ref tx) = port_tx {
-                let _ = tx.send(port);
-            }
+            let port = listener.local_addr()?.port();
+            info!("✅ HTTP server bound to {}:{}", cfg.api_host, port);
             (listener, port)
         }
         Err(e) => {
             warn!("⚠️ Failed to bind to port {}: {}", cfg.api_port, e);
-            warn!("🔄 Attempting to find available port...");
-            
-            // Try random ports in range 8002-8999 to avoid conflicts with llama-server (8001) and prometheus (9000)
+            warn!("🔄 Scanning 8002-8999 for available port...");
             let mut last_error = None;
             let mut found_listener = None;
-            let mut found_port = 0;
-            for attempt in 0..100 {
-                let random_port = 8002 + (rand::random::<u16>() % 997);
-                match try_bind_port(&cfg.api_host, random_port).await {
+            let mut found_port = 0u16;
+            for port in 8002u16..=8999 {
+                match try_bind_port(&cfg.api_host, port).await {
                     Ok(listener) => {
-                        let local_addr = listener.local_addr()?;
-                        found_port = local_addr.port();
-                        info!("✅ HTTP server bound to alternative port {}:{}", local_addr.ip(), found_port);
-                        // Store the selected port in shared state for discovery
-                        if let Ok(mut port_guard) = shared_state.http_port.write() {
-                            *port_guard = found_port;
-                        }
-                        // Communicate the port back to main thread
-                        if let Some(ref tx) = port_tx {
-                            let _ = tx.send(found_port);
-                        }
+                        found_port = listener.local_addr()?.port();
+                        info!("✅ HTTP server bound to alternative port {}", found_port);
+                        if let Ok(mut g) = shared_state.http_port.write() { *g = found_port; }
                         found_listener = Some(listener);
                         break;
                     }
-                    Err(e) => {
-                        last_error = Some(e);
-                        if attempt >= 99 {
-                            // Provide more detailed error information for firewall issues
-                            let error_msg = format!("Failed to find available port after 100 attempts. This may be due to:\n  - Firewall blocking local connections\n  - Antivirus software interference\n  - Another instance already running\n  - Insufficient permissions\n\nPlease check:\n  - Disable firewall temporarily to test\n  - Close any other Aud.io applications\n  - Run as Administrator if on Windows\n\nLast error: {:?}", last_error);
-                            return Err(anyhow!("{}", error_msg));
-                        }
-                    }
+                    Err(e) => { last_error = Some(e); }
                 }
             }
-            let listener = found_listener.ok_or_else(|| anyhow::anyhow!("No available port found. This may be due to firewall restrictions. Please check that the application has permission to bind to local ports."))?;
+            let listener = found_listener.ok_or_else(|| anyhow!(
+                "Failed to find available port after scanning 8002-8999.\n  Last error: {:?}\n  Hints: disable firewall, close other Aud.io instances, or run as Administrator.",
+                last_error
+            ))?;
             (listener, found_port)
         }
     };
 
-    info!("🌐 Server will accept connections on port {}", selected_port);
-
-    // CRITICAL: Send the selected port back to the main thread
-    // The main thread is waiting for this to know what port to connect to
-    if let Some(tx) = port_tx {
+    // Send port to main thread — satisfies the 60-second actual_port_rx timeout.
+    if let Some(ref tx) = port_tx {
         if let Err(e) = tx.send(selected_port) {
             warn!("Failed to send port to main thread: {}", e);
         } else {
             info!("✅ Port {} communicated to main thread", selected_port);
         }
     }
+    info!("🌐 Server will accept connections on port {}", selected_port);
 
-    info!("Building Axum router...");
-    let app = build_compatible_router(unified_state);
-    
-    info!("Starting Axum server on port {}...", selected_port);
-    
-    // Start server - this blocks
+    // ── Phase 3: Slow runtime init in background ──────────────────────────────
+    // Starting llama-server and waiting for it to be healthy can take 30-120 s.
+    // We do this in a background task; the HTTP server starts immediately and
+    // returns {"status":"initializing"} until mark_initialization_complete() fires.
+    {
+        let shared_state_bg = shared_state.clone();
+        let cfg_bg = cfg.clone();
+        let memory_database_bg = memory_database.clone();
+        tokio::spawn(async move {
+            // Context orchestrator (may query DB but is quick)
+            let context_orchestrator = match crate::context_engine::create_default_orchestrator(
+                memory_database_bg,
+            ).await {
+                Ok(mut orchestrator) => {
+                    orchestrator.set_llm_worker(shared_state_bg.llm_worker.clone());
+                    info!("Context orchestrator initialized");
+                    Some(orchestrator)
+                }
+                Err(e) => {
+                    warn!("Context orchestrator failed: {}. Memory features disabled.", e);
+                    None
+                }
+            };
+            {
+                let mut g = shared_state_bg.context_orchestrator.write().await;
+                *g = context_orchestrator;
+            }
+
+            // Runtime Manager — this is the slow part (starts llama-server)
+            info!("🚀 Initializing Runtime Manager");
+            let runtime_manager = Arc::new(crate::model_runtime::RuntimeManager::new());
+            let runtime_config = crate::model_runtime::RuntimeConfig {
+                model_path: std::path::PathBuf::from(&cfg_bg.model_path),
+                format: crate::model_runtime::ModelFormat::GGUF,
+                host: cfg_bg.llama_host.clone(),
+                port: cfg_bg.llama_port,
+                context_size: cfg_bg.ctx_size,
+                batch_size: cfg_bg.batch_size,
+                threads: cfg_bg.threads,
+                gpu_layers: cfg_bg.gpu_layers,
+                runtime_binary: if cfg_bg.llama_bin.is_empty() { None } else { Some(std::path::PathBuf::from(&cfg_bg.llama_bin)) },
+                extra_config: serde_json::json!({}),
+            };
+
+            // Check whether an engine binary exists
+            let has_engine = if let Some(ref em) = shared_state_bg.engine_manager {
+                let reg = em.registry.read().await;
+                reg.get_default_engine_binary_path().is_some()
+            } else { false };
+
+            if has_engine {
+                if let Err(e) = shared_state_bg.set_runtime_manager(runtime_manager.clone()) {
+                    error!("❌ Failed to set runtime manager: {}", e);
+                }
+                shared_state_bg.llm_worker.set_runtime_manager(runtime_manager.clone());
+                info!("🔗 LLM worker linked to runtime manager");
+
+                // Try to auto-load the last used model
+                let last_model_loaded = 'load: {
+                    if !cfg_bg.model_path.is_empty() { break 'load false; }
+                    let Some(data_dir) = dirs::data_dir() else { break 'load false; };
+                    let last_model_path = data_dir.join("Aud.io").join("last_model.txt");
+                    let Ok(last_model_id_raw) = std::fs::read_to_string(&last_model_path) else {
+                        info!("ℹ️  No last used model found");
+                        break 'load false;
+                    };
+                    let last_model_id = last_model_id_raw.trim().to_string();
+                    info!("🔄 Found last used model: {}", last_model_id);
+
+                    let Some(ref model_manager) = shared_state_bg.model_manager else {
+                        info!("ℹ️  Model manager not available - skipping auto-load");
+                        break 'load false;
+                    };
+                    let registry = model_manager.registry.read().await;
+                    let Some(model_info) = registry.get_model(&last_model_id) else {
+                        drop(registry);
+                        warn!("⚠️  Last used model not found in registry: {}", last_model_id);
+                        break 'load false;
+                    };
+                    if model_info.status != crate::model_management::registry::ModelStatus::Installed {
+                        drop(registry);
+                        info!("ℹ️  Last used model not installed");
+                        break 'load false;
+                    }
+                    let Some(ref filename) = model_info.filename else {
+                        drop(registry);
+                        warn!("⚠️  Last used model has no filename");
+                        break 'load false;
+                    };
+                    let model_path_for_runtime = model_manager.storage.model_path(&last_model_id, filename);
+                    drop(registry);
+
+                    if !model_path_for_runtime.exists() {
+                        warn!("⚠️  Last used model file not found: {}", model_path_for_runtime.display());
+                        break 'load false;
+                    }
+                    info!("✅ Auto-loading last used model from: {}", model_path_for_runtime.display());
+
+                    let default_engine = if let Some(ref em) = shared_state_bg.engine_manager {
+                        let reg = em.registry.read().await;
+                        reg.get_default_engine_binary_path()
+                    } else { None };
+
+                    let mut updated_config = runtime_config.clone();
+                    updated_config.model_path = model_path_for_runtime;
+                    updated_config.runtime_binary = default_engine;
+
+                    match runtime_manager.initialize_auto(updated_config).await {
+                        Ok(base_url) => {
+                            info!("✅ Last used model auto-loaded at {}", base_url);
+                            match runtime_manager.health_check().await {
+                                Ok(status) => { info!("✅ Runtime health check passed: {}", status); true }
+                                Err(e) => { warn!("⚠️  Runtime health check failed: {}", e); false }
+                            }
+                        }
+                        Err(e) => { warn!("⚠️  Failed to auto-load last used model: {}", e); false }
+                    }
+                };
+
+                if !last_model_loaded && !cfg_bg.model_path.is_empty() {
+                    let default_engine = if let Some(ref em) = shared_state_bg.engine_manager {
+                        let reg = em.registry.read().await;
+                        reg.get_default_engine_binary_path()
+                    } else { None };
+                    let mut updated_config = runtime_config;
+                    updated_config.runtime_binary = default_engine;
+                    info!("🚀 Initializing runtime with config model path...");
+                    match runtime_manager.initialize_auto(updated_config).await {
+                        Ok(base_url) => {
+                            info!("✅ Runtime initialized at {}", base_url);
+                            shared_state_bg.llm_worker.set_runtime_manager(runtime_manager);
+                        }
+                        Err(e) => warn!("⚠️  Runtime initialization failed: {}. Online-only mode.", e),
+                    }
+                }
+            } else {
+                info!("⏳ No engine found - starting in online-only mode");
+            }
+
+            // Signal health endpoint: backend is now fully initialized
+            shared_state_bg.mark_initialization_complete();
+            info!("✅ Background initialization complete");
+        });
+    }
+
+    // Spawn attachment cache eviction task.
+    // Runs every 5 minutes and removes entries older than 30 minutes so the
+    // DashMap doesn't grow unboundedly when users attach many files without sending.
+    {
+        let cache = shared_state.attachment_cache.clone();
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(300); // 5 minutes
+            loop {
+                tokio::time::sleep(interval).await;
+                let before = cache.len();
+                cache.retain(|_, v: &mut crate::shared_state::PreExtracted| {
+                    !v.is_stale(crate::api::attachment_api::CACHE_TTL_SECS)
+                });
+                let removed = before - cache.len();
+                if removed > 0 {
+                    info!("Attachment cache eviction: removed {} stale entries", removed);
+                }
+            }
+        });
+    }
+
+    // Start server — this blocks until the process exits.
+    info!("🟢 Axum server starting on port {}...", selected_port);
     if let Err(e) = axum::serve(listener, app).await {
         error!("Axum server error: {}", e);
     }
@@ -575,19 +480,63 @@ fn build_compatible_router(mut state: UnifiedAppState) -> axum::Router {
 
     // Get users store from database
     let users_store = state.shared_state.database_pool.users.clone();
-    
+
+    // Initialize Google OAuth state.
+    //
+    // Resolution order (first non-empty value wins):
+    //  1. Compile-time constant via `option_env!()` — baked into the binary at `cargo build`.
+    //     Set these in your CI/CD pipeline or locally before running `cargo tauri build`.
+    //     End users of the shipped installer never need to set anything.
+    //  2. Runtime environment variable — useful during local development / debugging.
+    let google_oauth = {
+        let client_id = option_env!("GOOGLE_CLIENT_ID")
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty()));
+
+        let client_secret = option_env!("GOOGLE_CLIENT_SECRET")
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("GOOGLE_CLIENT_SECRET").ok().filter(|s| !s.is_empty()));
+
+        match (client_id, client_secret) {
+            (Some(id), Some(secret)) => {
+                tracing::info!(
+                    "Google OAuth configured (client_id: {}...)",
+                    &id[..id.len().min(12)]
+                );
+                Some(crate::api::auth_api::GoogleOAuthPending {
+                    states: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                    client_id: id,
+                    client_secret: secret,
+                })
+            }
+            _ => {
+                tracing::info!(
+                    "Google OAuth not configured — set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET before building"
+                );
+                None
+            }
+        }
+    };
+
     // Create and set auth state
     state.auth_state = Some(Arc::new(crate::api::auth_api::AuthState {
         users: users_store,
         jwt_secret,
+        google: google_oauth,
     }));
 
     Router::new()
-        // Auth routes (email/password with SMTP verification)
+        // Auth routes — email/password (legacy) + Google OAuth
         .route("/auth/signup", post(crate::api::auth_api::signup))
         .route("/auth/login", post(crate::api::auth_api::login))
         .route("/auth/verify-email", post(crate::api::auth_api::verify_email))
         .route("/auth/me", post(crate::api::auth_api::get_current_user))
+        // Google OAuth endpoints
+        .route("/auth/google/init", post(crate::api::auth_api::google_init))
+        .route("/auth/google/callback", get(crate::api::auth_api::google_callback))
+        .route("/auth/google/status", get(crate::api::auth_api::google_status))
         // Core 1-hop streaming endpoint
         .route("/generate/stream", post(crate::api::stream_api::generate_stream))
         // Online mode streaming endpoint
@@ -657,6 +606,8 @@ fn build_compatible_router(mut state: UnifiedAppState) -> axum::Router {
         .route("/feedback", post(crate::api::feedback_api::submit_feedback))
         // Login notification endpoint
         .route("/notify-login", post(crate::api::login_notification_api::notify_user_login))
+        // Attachment pre-extraction endpoint
+        .route("/attachments/preprocess", post(crate::api::attachment_api::preprocess_attachments))
         // Metrics endpoint
         .route("/metrics", get(crate::metrics::get_metrics))
         .route("/healthz", get(health_check))

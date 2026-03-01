@@ -419,34 +419,23 @@ impl AllFilesStore {
         ).map_err(|e| anyhow::anyhow!("File not found: {}", e))
     }
 
-    /// Get file by exact name (first match)
-    pub fn get_file_by_name(&self, name: &str) -> anyhow::Result<AllFile> {
-        let conn = self.pool.get()?;
+    /// Get file content as raw bytes (for binary-aware extraction)
+    pub fn get_file_bytes(&self, id: i64) -> anyhow::Result<Vec<u8>> {
+        let file = self.get_file(id)?;
 
-        conn.query_row(
-            "SELECT id, name, path, parent_id, is_directory, file_path, size_bytes, mime_type, created_at, modified_at, last_accessed, access_count
-             FROM all_files WHERE name = ?1 AND is_directory = FALSE LIMIT 1",
-            [name],
-            |row| {
-                Ok(AllFile {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    path: row.get(2)?,
-                    parent_id: row.get(3)?,
-                    is_directory: row.get(4)?,
-                    file_path: row.get(5)?,
-                    size_bytes: row.get(6)?,
-                    mime_type: row.get(7)?,
-                    created_at: row.get::<_, String>(8)?.parse().unwrap_or_else(|_| Utc::now()),
-                    modified_at: row.get::<_, String>(9)?.parse().unwrap_or_else(|_| Utc::now()),
-                    last_accessed: row.get::<_, Option<String>>(10)?.and_then(|s| s.parse().ok()),
-                    access_count: row.get(11)?,
-                })
-            },
-        ).map_err(|e| anyhow::anyhow!("File not found by name: {}", e))
+        if file.is_directory {
+            return Err(anyhow::anyhow!("Cannot read content of directory"));
+        }
+
+        let file_path = file
+            .file_path
+            .ok_or_else(|| anyhow::anyhow!("File path not stored"))?;
+        let fs_path = self.all_files_dir.join(&file_path);
+
+        std::fs::read(&fs_path).map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))
     }
 
-    /// Get file content as string
+    /// Get file content as string (text files only — binary files return lossy UTF-8)
     pub fn get_file_content_string(&self, id: i64) -> anyhow::Result<String> {
         let file = self.get_file(id)?;
 

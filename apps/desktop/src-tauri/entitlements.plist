@@ -14,6 +14,11 @@
     <key>com.apple.security.network.client</key>
     <true/>
 
+    <!-- Enable incoming connections for the local backend server (port 8000) and
+         the Google OAuth loopback callback (http://127.0.0.1:{port}/auth/google/callback) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
     <!-- Allow reading and writing user-selected files (model files, exports, logs) -->
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>

@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import type { Message, ChatAttachment } from '../api/chat';
 import { streamChat, updateConversationTitle } from '../api/chat';
+import { open as tauriOpenDialog } from '@tauri-apps/plugin-dialog';
 import { getApiBaseSync } from '../api/backendUrl';
 import { useChatTitle } from '../hooks/useChatTitle';
 import { useAuth } from '../contexts/AuthContext';
@@ -94,9 +95,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     const modelDropdownRef = useRef<HTMLDivElement>(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [isDeleting, setIsDeleting] = useState(false);
-    const fileInputRef = useRef<HTMLInputElement>(null);
-    const selectedFilesRef = useRef<FileList | null>(null);
-    const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+    const [attachedFiles, setAttachedFiles] = useState<ChatAttachment[]>([]);
     const [localFileAttachments, setLocalFileAttachments] = useState<ChatAttachment[]>([]);
     const [removingFiles, setRemovingFiles] = useState<Set<string>>(new Set());
     const { generateTitle } = useChatTitle();
@@ -106,8 +105,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
     // Backend readiness state
     const [backendReady, setBackendReady] = useState(false);
-    // Model ready state - tracks actual model loading status
-    const [modelReady, setModelReady] = useState(false);
     
     // @filename autocomplete state — sourced exclusively from curated files
     const [localFiles, setLocalFiles] = useState<Array<{ id: number; name: string; path: string; is_directory: boolean }>>([]);
@@ -145,29 +142,32 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 const response = await fetch(`${getApiBaseSync()}/healthz`);
                 if (cancelled) return;
                 if (response.ok) {
+                    // Enhanced health check: Accept both "ready" and "degraded" states
                     try {
                         const healthData = await response.json();
                         // healthData = { status: "ready" | "initializing" | "degraded", runtime_ready: boolean, message?: string }
 
-                        // Check if backend is initialized (not still starting up)
-                        const isBackendReady = healthData.status === 'ready' || healthData.status === 'degraded';
-                        setBackendReady(isBackendReady);
-
-                        // Check if runtime/model is actually loaded - this is what matters for sending messages
-                        const isModelReady = healthData.runtime_ready === true;
-                        setModelReady(isModelReady);
-
-                        console.log('Backend ready:', healthData.status, 'Model ready:', isModelReady);
-
-                        // Keep polling until both backend and model are ready
-                        if (!isBackendReady || !isModelReady) {
+                        // For OLLAMA-style behavior: Accept "degraded" (no model) as backend ready
+                        // User can download/activate models through UI
+                        if (healthData.status === 'ready' || healthData.status === 'degraded') {
+                            setBackendReady(true);
+                            console.log('Backend ready:', healthData.status, healthData.runtime_ready ? '(model loaded)' : '(no model loaded yet)');
+                        } else if (healthData.status === 'initializing') {
+                            console.log('Backend still initializing...');
+                            setBackendReady(false);
+                            // Retry after delay
+                            const delay = Math.min(10000, 500 * Math.pow(2, attempt + 1));
+                            timeoutId = setTimeout(() => checkBackendReadiness(attempt + 1), delay);
+                        } else {
+                            // Unknown status - retry
+                            setBackendReady(false);
                             const delay = Math.min(10000, 500 * Math.pow(2, attempt + 1));
                             timeoutId = setTimeout(() => checkBackendReadiness(attempt + 1), delay);
                         }
                     } catch (parseError) {
-                        console.warn('Health check response format unexpected');
-                        setBackendReady(false);
-                        setModelReady(false);
+                        // Fallback if JSON parsing fails (backward compatibility)
+                        console.warn('Health check response format unexpected, assuming ready');
+                        setBackendReady(true);
                     }
                 } else {
                     throw new Error(`Backend health check failed with status: ${response.status}`);
@@ -176,8 +176,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 if (cancelled) return;
                 console.warn('Backend not ready yet, attempt:', attempt + 1);
                 setBackendReady(false);
-                setModelReady(false);
 
+                // Exponential backoff: retry after progressively longer delays (max 10s)
                 const delay = Math.min(10000, 500 * Math.pow(2, attempt + 1));
                 timeoutId = setTimeout(() => checkBackendReadiness(attempt + 1), delay);
             }
@@ -411,71 +411,73 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         }
     };
 
-    // Insert file as attachment (from @autocomplete) - like paperclip icon
-    const insertFileAsAttachment = async (file: { id: number; name: string }) => {
-        try {
-            const response = await fetch(`${getApiBaseSync()}/all-files/${file.id}/content`);
-            if (response.ok) {
-                const data = await response.json();
-                const content = data.content || '';
-                
-                const newAttachment: ChatAttachment = {
-                    name: file.name,
-                    content_text: content,
-                    mime_type: 'text/plain',
-                };
-                
-                setLocalFileAttachments(prev => [...prev, newAttachment]);
-                console.log('[DEBUG] Added local file attachment:', file.name);
-            }
-        } catch (error) {
-            console.error('Failed to fetch file content:', error);
+    // Fire-and-forget: ask the backend to pre-extract the given attachments NOW,
+    // while the user is still typing, so the content is cached by the time Send is pressed.
+    // Errors are silently swallowed — extraction will fall back to the on-demand path.
+    const triggerPreprocess = (attachments: ChatAttachment[]) => {
+        if (attachments.length === 0) return;
+        const apiBase = getApiBaseSync();
+        if (!apiBase) return;
+        fetch(`${apiBase}/attachments/preprocess`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ attachments }),
+        }).catch(() => {});
+    };
+
+    // Insert local_storage file as attachment (from @autocomplete).
+    // Sends only the database ID — backend reads content server-side (no fetch round-trip).
+    const insertFileAsAttachment = (file: { id: number; name: string }) => {
+        // Avoid duplicates
+        if (!localFileAttachments.some(a => a.all_files_id === file.id)) {
+            const newAttachment: ChatAttachment = {
+                name: file.name,
+                source: 'local_storage',
+                all_files_id: file.id,
+            };
+            setLocalFileAttachments(prev => [...prev, newAttachment]);
+            console.log('[DEBUG] Queued local_storage attachment:', file.name, '(id:', file.id, ')');
+            // Pre-extract in background while user types.
+            triggerPreprocess([newAttachment]);
         }
-        
+
         // Remove the @ query from input
         const cursorPos = inputRef.current?.selectionStart || input.length;
         const textBeforeCursor = input.slice(0, cursorPos);
         const textAfterCursor = input.slice(cursorPos);
         const atIndex = textBeforeCursor.lastIndexOf('@');
         if (atIndex >= 0) {
-            // Find the end of the filename (next whitespace or end of string)
             let endIndex = cursorPos;
-            for (let i = cursorPos; i < textAfterCursor.length; i++) {
+            for (let i = 0; i < textAfterCursor.length; i++) {
                 if (textAfterCursor[i] === ' ' || textAfterCursor[i] === '\n') {
-                    endIndex = i;
+                    endIndex = cursorPos + i;
                     break;
                 }
             }
-            const newText = textBeforeCursor.slice(0, atIndex) + textAfterCursor.slice(endIndex);
+            const newText = textBeforeCursor.slice(0, atIndex) + input.slice(endIndex);
             setInput(newText.trim());
         }
         setShowFileAutocomplete(false);
         setTimeout(() => inputRef.current?.focus(), 50);
     };
 
-    // Insert curated file as attachment from folder-icon picker
-    const insertCuratedFileAsAttachment = async (file: { id: number; name: string; is_directory: boolean }) => {
+    // Insert local_storage file from folder-icon picker.
+    // Sends only the database ID — backend reads content server-side (no fetch round-trip).
+    const insertCuratedFileAsAttachment = (file: { id: number; name: string; is_directory: boolean }) => {
         if (file.is_directory) return;
-        
-        try {
-            const response = await fetch(`${getApiBaseSync()}/all-files/${file.id}/content`);
-            if (response.ok) {
-                const data = await response.json();
-                const content = data.content || '';
-                
-                const newAttachment: ChatAttachment = {
-                    name: file.name,
-                    content_text: content,
-                    mime_type: 'text/plain',
-                };
-                
-                setLocalFileAttachments(prev => [...prev, newAttachment]);
-                console.log('[DEBUG] Added curated file attachment:', file.name);
-            }
-        } catch (error) {
-            console.error('Failed to fetch curated file content:', error);
+
+        if (!localFileAttachments.some(a => a.all_files_id === file.id)) {
+            const newAttachment: ChatAttachment = {
+                name: file.name,
+                source: 'local_storage',
+                all_files_id: file.id,
+            };
+            setLocalFileAttachments(prev => [...prev, newAttachment]);
+            console.log('[DEBUG] Queued local_storage attachment from picker:', file.name, '(id:', file.id, ')');
+            // Pre-extract in background while user types.
+            triggerPreprocess([newAttachment]);
         }
-        
+
         setShowCuratedPicker(false);
         fetchCuratedFiles();
         setTimeout(() => inputRef.current?.focus(), 50);
@@ -493,6 +495,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
     const handleSend = async () => {
         if (!input.trim() || isLoading) return;
+        
+        // Check backend readiness before sending message
+        if (!backendReady) {
+            console.log('Backend not ready');
+            return;
+        }
 
         let currentSessionId = sessionId;
         if (!currentSessionId) {
@@ -500,121 +508,89 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             onSessionIdChange(currentSessionId);
         }
 
-        // Read attached files as in-memory content (temporary, NOT persisted)
-        const inlineAttachments: ChatAttachment[] = [];
-        if (attachedFiles.length > 0) {
-            console.log('[DEBUG] Processing', attachedFiles.length, 'attached files');
-            for (const file of attachedFiles) {
-                try {
-                    // Enhanced file type detection to include PDF and other document formats
-                    const isTextFile = /\.(txt|md|json|xml|yaml|yml|csv|html|css|scss|js|ts|jsx|tsx|py|java|cpp|c|cs|go|rs|php|rb|swift|kt|scala|sql|sh|bat|ps1|dockerfile|env|rtf)$/i.test(file.name);
-                    const isDocumentFile = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx)$/i.test(file.name);
-                    console.log('[DEBUG] File:', file.name, 'isText:', isTextFile, 'isDocument:', isDocumentFile, 'size:', file.size);
-                    
-                    if (isTextFile) {
-                        // Read as text for code/text files
-                        const text = await file.text();
-                        console.log('[DEBUG] Read text content, length:', text.length);
-                        inlineAttachments.push({
-                            name: file.name,
-                            content_text: text,
-                            mime_type: file.type || 'text/plain',
-                        });
-                    } else {
-                        // Read as base64 for binary files including documents
-                        const arrayBuffer = await file.arrayBuffer();
-                        const bytes = new Uint8Array(arrayBuffer);
-                        let binary = '';
-                        for (let i = 0; i < bytes.length; i++) {
-                            binary += String.fromCharCode(bytes[i]);
-                        }
-                        const base64 = btoa(binary);
-                        console.log('[DEBUG] Read binary content, base64 length:', base64.length);
-                        inlineAttachments.push({
-                            name: file.name,
-                            content_base64: base64,
-                            mime_type: file.type || (isDocumentFile ? 'application/octet-stream' : 'application/octet-stream'),
-                        });
-                    }
-                } catch (error) {
-                    console.error(`Failed to read file ${file.name}:`, error);
-                }
-            }
-            console.log('[DEBUG] Created', inlineAttachments.length, 'inline attachments');
-            // Clear references - files are now in memory only
-            selectedFilesRef.current = null;
-        }
+        // Build attachment list — references only (OS paths or DB IDs).
+        // Backend reads and extracts all file content server-side, for BOTH
+        // offline (local LLM) and online (OpenRouter) modes.
+        // No base64 encoding, no content fetching here.
+        const allAttachments: ChatAttachment[] = [...attachedFiles, ...localFileAttachments];
+        console.log('[DEBUG] Attachments to send:', allAttachments.length,
+            '(inline:', attachedFiles.length, 'local_storage:', localFileAttachments.length, ')');
+        allAttachments.forEach((a, i) =>
+            console.log('[DEBUG] Attachment', i, ':', a.name, 'source:', a.source,
+                'file_path:', a.file_path || '-', 'all_files_id:', a.all_files_id ?? '-'));
 
-        // Include local file attachments (from @ autocomplete) - already have content fetched
-        const allAttachments = [...inlineAttachments, ...localFileAttachments];
-        console.log('[DEBUG] Total attachments:', allAttachments.length, '(inline:', inlineAttachments.length, 'local:', localFileAttachments.length, ')');
-        if (allAttachments.length > 0) {
-            allAttachments.forEach((a, i) => console.log('[DEBUG] Attachment', i, ':', a.name, 'text:', !!a.content_text, 'base64:', !!a.content_base64));
-        }
-        
-        // Get all file names for display
-        const allFileNames = [...attachedFiles.map(f => f.name), ...localFileAttachments.map(a => a.name)];
-        console.log('[DEBUG] allFileNames:', allFileNames);
-
+        // Get all file names for display in the user message annotation
+        const allFileNames = allAttachments.map(a => a.name);
         const fileContext = allFileNames.length > 0
             ? `\n[Attached files: ${allFileNames.join(', ')}]`
             : '';
-        console.log('[DEBUG] fileContext:', fileContext);
+
         const firstPrompt = !firstPromptSent.current ? input.trim() : null;
-        
+
+        // Determine routing — same attachments array is used for BOTH modes.
+        // Backend handles server-side file extraction for offline and online.
+        const useOpenRouter = isOnlineMode && selectedModel?.source === 'openrouter' && openRouterApiKey;
         const userContent = input.trim() + fileContext;
-        
-        console.log('[DEBUG] userContent:', userContent);
         
         const userMsg: Message = { role: 'user', content: userContent };
         const newMessages = [...messages, userMsg];
 
         onMessagesUpdate(newMessages);
         setInput('');
-        
-        // Clear attachments only after we successfully start the stream
-        // If there's an error, attachments will remain for retry
-        const clearAttachments = () => {
-            setAttachedFiles([]);
-            setLocalFileAttachments([]);
-        };
-        
+        setAttachedFiles([]);
+        setLocalFileAttachments([]);
         setIsLoading(true);
         onQuestionAsked();
 
-        if (firstPrompt && !chatTitle && modelReady) {
+        if (firstPrompt && !chatTitle) {
             firstPromptSent.current = true;
-            generateTitle(firstPrompt).then(title => {
-                if (title) {
-                    updateConversationTitle(currentSessionId!, title).catch(err => console.error('Failed to save title:', err));
-                    onTitleGenerated?.(title, currentSessionId!);
-                }
-            }).catch(err => console.error('Title generation failed:', err));
+            // Use the first 50 chars of the user's message as the title — same pattern
+            // as ChatGPT, Claude.ai, etc. Instant, no extra LLM call, always readable.
+            const firstMsgTitle = firstPrompt.slice(0, 50) + (firstPrompt.length > 50 ? '...' : '');
+            updateConversationTitle(currentSessionId!, firstMsgTitle)
+                .catch(err => console.error('Failed to save title:', err));
+            onTitleGenerated?.(firstMsgTitle, currentSessionId!);
         }
 
         try {
             onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: '' }]);
             let fullContent = '';
-            let streamStarted = false;
 
-            // Route all sends through the backend which handles both offline (local LLM)
-            // and online (OpenRouter) modes with proper attachment extraction for all file types
-            for await (const chunk of streamChat(
-                newMessages,
-                currentSessionId!,
-                isOnlineMode,
-                selectedModel?.id,
-                allAttachments.length > 0 ? allAttachments : undefined,
-                isOnlineMode ? (openRouterApiKey || localStorage.getItem('aud-io-openrouter-key') || undefined) : undefined
-            )) {
-                if (!streamStarted) {
-                    streamStarted = true;
-                    clearAttachments();
+            if (useOpenRouter) {
+                // Route OpenRouter through /generate/stream so the backend handles
+                // server-side file extraction before forwarding to OpenRouter.
+                // Strip 'openrouter:' or 'openrouter/' prefix — OpenRouter expects 'provider/model'.
+                let modelIdForOpenRouter = selectedModel!.id;
+                if (modelIdForOpenRouter.startsWith('openrouter:')) {
+                    modelIdForOpenRouter = modelIdForOpenRouter.slice(11);
+                } else if (modelIdForOpenRouter.startsWith('openrouter/')) {
+                    modelIdForOpenRouter = modelIdForOpenRouter.slice(11);
                 }
-                fullContent += chunk;
-                onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: fullContent }]);
+                for await (const chunk of streamChat(
+                    newMessages,
+                    currentSessionId!,
+                    true,
+                    modelIdForOpenRouter,
+                    allAttachments.length > 0 ? allAttachments : undefined,
+                    openRouterApiKey || localStorage.getItem('aud-io-openrouter-key') || undefined
+                )) {
+                    fullContent += chunk;
+                    onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: fullContent }]);
+                }
+            } else {
+                // Route to local llama-server — backend extracts content from attachments
+                for await (const chunk of streamChat(
+                    newMessages,
+                    currentSessionId!,
+                    isOnlineMode,
+                    selectedModel?.id,
+                    allAttachments.length > 0 ? allAttachments : undefined,
+                    undefined
+                )) {
+                    fullContent += chunk;
+                    onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: fullContent }]);
+                }
             }
-            // If we got here, stream completed successfully - attachments already cleared
         } catch (error: unknown) {
             console.error('Chat error:', error);
             const errMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -631,7 +607,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             }
             
             onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: errorMsg }]);
-            // Don't clear attachments on error - they remain for retry
 
         } finally {
             setIsLoading(false);
@@ -669,56 +644,54 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         }
     };
 
-    const handleFileUpload = () => {
-        fileInputRef.current?.click();
-    };
+    // Open Tauri native file dialog — gets real OS paths, no base64 encoding.
+    // Backend reads files server-side and extracts text within a 64k-token budget.
+    const handleFileUpload = async () => {
+        try {
+            const selected = await tauriOpenDialog({
+                multiple: true,
+                filters: [{
+                    name: 'Supported Files',
+                    extensions: [
+                        'pdf', 'doc', 'docx', 'txt', 'rtf', 'odt',
+                        'xls', 'xlsx', 'csv', 'ods',
+                        'ppt', 'pptx', 'odp',
+                        'js', 'ts', 'jsx', 'tsx', 'py', 'java', 'cpp', 'c', 'cs',
+                        'html', 'css', 'scss', 'json', 'xml', 'yaml', 'yml', 'md',
+                        'go', 'rs', 'php', 'rb', 'swift', 'kt', 'scala', 'sql',
+                        'sh', 'bat', 'ps1', 'dockerfile', 'env',
+                    ],
+                }],
+            });
+            if (!selected) return;
+            const paths = Array.isArray(selected) ? selected : [selected];
 
-    const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const files = e.target.files;
-        if (!files || files.length === 0) return;
-
-        // Accept all file types - no restrictions
-        const filteredFiles = Array.from(files);
-
-        const combined = [...attachedFiles, ...filteredFiles];
-        if (combined.length > 16) {
-            alert('You can only attach up to 16 files at a time.');
-            e.target.value = '';
-            return;
+            const combined = [...attachedFiles];
+            for (const p of paths) {
+                const name = p.replace(/.*[\\/]/, '');
+                // Skip duplicates
+                if (combined.some(f => f.file_path === p)) continue;
+                combined.push({ name, source: 'inline', file_path: p });
+            }
+            if (combined.length > 16) {
+                alert('You can only attach up to 16 files at a time.');
+                return;
+            }
+            setAttachedFiles(combined);
+            // Pre-extract newly added files in background while user types.
+            const newFiles = combined.filter(
+                f => !attachedFiles.some(a => a.file_path === f.file_path)
+            );
+            triggerPreprocess(newFiles);
+        } catch (err) {
+            console.error('File dialog error:', err);
         }
-
-        // Update state-driven attached files
-        setAttachedFiles(combined);
-
-        // Also keep the ref in sync for the upload in handleSend
-        const allFiles = combined;
-        const fileList = {
-            ...allFiles,
-            length: allFiles.length,
-            item: (index: number) => allFiles[index]
-        } as unknown as FileList;
-        selectedFilesRef.current = fileList;
-
-        e.target.value = '';
     };
 
     const handleRemoveFile = (fileName: string) => {
         setRemovingFiles(prev => new Set(prev).add(fileName));
         setTimeout(() => {
-            setAttachedFiles(prev => {
-                const updated = prev.filter(f => f.name !== fileName);
-                // Sync ref
-                if (updated.length === 0) {
-                    selectedFilesRef.current = null;
-                } else {
-                    selectedFilesRef.current = {
-                        ...updated,
-                        length: updated.length,
-                        item: (index: number) => updated[index]
-                    } as unknown as FileList;
-                }
-                return updated;
-            });
+            setAttachedFiles(prev => prev.filter(f => f.name !== fileName));
             setRemovingFiles(prev => {
                 const next = new Set(prev);
                 next.delete(fileName);
@@ -748,6 +721,36 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         if (['md'].includes(ext)) return '📑';
         if (['sh', 'bat', 'ps1'].includes(ext)) return '⚙️';
         return '📎';
+    };
+
+    // ---------------------------------------------------------------------------
+    // Attachment display helpers
+    // ---------------------------------------------------------------------------
+    //
+    // The frontend appends "\n[Attached files: name1, name2]" to user message
+    // content so the names are stored for history display.  The backend injects
+    // the actual file text into processed_messages for LLM context — but since
+    // that injected content is NOT stored in the DB anymore (fixed in stream_api),
+    // old messages may still contain "--- Content of attached file ---" blocks.
+    //
+    // parseUserMessage strips both the annotation tag and any injected content
+    // blocks so the rendered text is clean, and returns the file-name list for
+    // rendering as visual chips inside the bubble.
+    const parseUserMessage = (content: string): { text: string; fileNames: string[] } => {
+        // Extract file names from "[Attached files: a.txt, b.pdf]" annotation
+        const annotationMatch = content.match(/\n?\[Attached files?: ([^\]]+)\]/i);
+        const fileNames = annotationMatch
+            ? annotationMatch[1].split(',').map(s => s.trim()).filter(Boolean)
+            : [];
+
+        const text = content
+            // Remove the [Attached files: ...] annotation
+            .replace(/\n?\[Attached files?: [^\]]+\]/gi, '')
+            // Strip legacy injected file content blocks (stored in old DB messages)
+            .replace(/\n---\s*Content of attached file:[^\n]*---\n[\s\S]*?\n---\s*End of file\s*---\n?/gi, '')
+            .trim();
+
+        return { text, fileNames };
     };
 
     // Helper functions to determine user setup status
@@ -814,7 +817,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     }}
                                     title={`Click to change model (${isOnlineMode ? 'Online' : 'Offline'})`}
                                 >
-                                    <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: isOnlineMode ? '#22C55E' : '#94A3B8', flexShrink: 0 }} />
+                                    <span style={{
+                                        width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0,
+                                        backgroundColor: isOnlineMode
+                                            ? (hasOnlineCapability ? '#22C55E' : '#EF4444')
+                                            : (hasOfflineCapability ? '#22C55E' : '#EF4444'),
+                                        boxShadow: isOnlineMode
+                                            ? (hasOnlineCapability ? '0 0 5px rgba(34,197,94,0.7)' : '0 0 5px rgba(239,68,68,0.7)')
+                                            : (hasOfflineCapability ? '0 0 5px rgba(34,197,94,0.7)' : '0 0 5px rgba(239,68,68,0.7)'),
+                                    }} />
                                     {selectedModel.name}
                                 </span>
                                 
@@ -953,7 +964,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     }}
                                     title="Click to select a model"
                                 >
-                                    <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: isOnlineMode ? '#22C55E' : '#94A3B8', flexShrink: 0 }} />
+                                    <span style={{
+                                        width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0,
+                                        backgroundColor: isOnlineMode
+                                            ? (hasOnlineCapability ? '#22C55E' : '#EF4444')
+                                            : (hasOfflineCapability ? '#22C55E' : '#EF4444'),
+                                        boxShadow: isOnlineMode
+                                            ? (hasOnlineCapability ? '0 0 5px rgba(34,197,94,0.7)' : '0 0 5px rgba(239,68,68,0.7)')
+                                            : (hasOfflineCapability ? '0 0 5px rgba(34,197,94,0.7)' : '0 0 5px rgba(239,68,68,0.7)'),
+                                    }} />
                                     Browse Models
                                 </span>
                                 {isModelDropdownOpen && (
@@ -1168,19 +1187,36 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         </div>
                     )}
 
-                    {messages.filter(m => m.role !== 'system').map((msg, idx) => (
-                        <div key={idx} className={`message-wrapper ${msg.role}`}>
-                            {msg.role === 'user' ? (
-                                <div className="message-bubble user">
-                                    <MessageContent content={msg.content} role="user" />
+                    {messages.filter(m => m.role !== 'system').map((msg, idx) => {
+                        if (msg.role === 'user') {
+                            const { text, fileNames } = parseUserMessage(msg.content);
+                            return (
+                                <div key={idx} className="message-wrapper user">
+                                    <div className="message-bubble user">
+                                        {/* File attachment chips — shown above message text, like ChatGPT/Claude.ai */}
+                                        {fileNames.length > 0 && (
+                                            <div className="message-attachments">
+                                                {fileNames.map((name, i) => (
+                                                    <span key={i} className="message-attachment-chip">
+                                                        <span className="message-attachment-icon">{getFileIcon(name)}</span>
+                                                        <span className="message-attachment-name">{name}</span>
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )}
+                                        <MessageContent content={text} role="user" />
+                                    </div>
                                 </div>
-                            ) : (
+                            );
+                        }
+                        return (
+                            <div key={idx} className="message-wrapper assistant">
                                 <div className="message-content-plain">
                                     <MessageContent content={msg.content} role="assistant" />
                                 </div>
-                            )}
-                        </div>
-                    ))}
+                            </div>
+                        );
+                    })}
                     {isLoading && (
                         <div className="message-wrapper assistant">
                             <div className="loading-bubble">
@@ -1202,6 +1238,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     <ModelPromptBanner
                         isOnlineMode={isOnlineMode}
                         hasApiKey={!!(openRouterApiKey || localStorage.getItem('aud-io-openrouter-key'))}
+                        hasLocalModel={hasOfflineCapability}
                         onOpenModels={(focusApiKey = false, focusHfToken = false) => onOpenModels?.(focusApiKey, focusHfToken)}
                         onToggleOnlineMode={onToggleOnlineMode}
                     />
@@ -1210,20 +1247,24 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 {(attachedFiles.length > 0 || localFileAttachments.length > 0) && (
                     <div className="attachment-tray-above-input">
                         {attachedFiles.map((file, index) => (
-                            <div key={`${file.name}-${index}`} className="attachment-chip">
+                            <div key={`${file.file_path || file.name}-${index}`} className="attachment-chip">
                                 <span className="attachment-icon">{getFileIcon(file.name)}</span>
                                 <span className="attachment-name" title={file.name}>{file.name}</span>
-                                <span className="attachment-size">{formatFileSize(file.size)}</span>
+                                {file.size_bytes != null && (
+                                    <span className="attachment-size">{formatFileSize(file.size_bytes)}</span>
+                                )}
                                 <button type="button" className="attachment-remove" onClick={() => handleRemoveFile(file.name)}>
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><path d="M18 6L6 18M6 6l12 12" /></svg>
                                 </button>
                             </div>
                         ))}
                         {localFileAttachments.map((file, index) => (
-                            <div key={`local-${file.name}-${index}`} className="attachment-chip">
+                            <div key={`local-${file.all_files_id ?? file.name}-${index}`} className="attachment-chip">
                                 <span className="attachment-icon">{getFileIcon(file.name)}</span>
                                 <span className="attachment-name" title={file.name}>{file.name}</span>
-                                <span className="attachment-size">{file.content_text ? `${(file.content_text.length / 1024).toFixed(1)} KB` : '-'}</span>
+                                {file.size_bytes != null && (
+                                    <span className="attachment-size">{formatFileSize(file.size_bytes)}</span>
+                                )}
                                 <button type="button" className="attachment-remove" onClick={() => removeLocalFileAttachment(file.name)}>
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><path d="M18 6L6 18M6 6l12 12" /></svg>
                                 </button>
@@ -1234,7 +1275,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 )}
                 <form onSubmit={handleSubmit} className="chat-input-form">
                     <div className="chat-input-pill">
-                        <input type="file" ref={fileInputRef} onChange={handleFileSelected} style={{ display: 'none' }} multiple accept=".pdf,.doc,.docx,.txt,.rtf,.odt,.xls,.xlsx,.csv,.ods,.ppt,.pptx,.odp,.js,.ts,.jsx,.tsx,.py,.java,.cpp,.c,.cs,.html,.css,.scss,.json,.xml,.yaml,.yml,.md,.go,.rs,.php,.rb,.swift,.kt,.scala,.sql,.sh,.bat,.ps1,.dockerfile,.env" />
                         <button
                             type="button"
                             className="input-icon-btn"

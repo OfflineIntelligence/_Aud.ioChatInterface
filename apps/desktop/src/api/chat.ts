@@ -14,11 +14,19 @@ export interface ChatRequest {
     attachments?: ChatAttachment[];
 }
 
-// Temporary chat attachment (in-memory, not persisted)
+// File attachment for chat — references only, no content bytes sent over the wire.
+// Backend reads files server-side and extracts text within a 64k-token budget.
 export interface ChatAttachment {
     name: string;
-    content_base64?: string;
+    source: 'inline' | 'local_storage';
+    // inline (paperclip): real OS path returned by Tauri file dialog
+    file_path?: string;
+    // local_storage (@filename / folder icon): database ID in all_files table
+    all_files_id?: number;
+    size_bytes?: number;
+    // Legacy fields kept for backward compatibility — deprecated
     content_text?: string;
+    content_base64?: string;
     mime_type?: string;
 }
 
@@ -113,13 +121,17 @@ export async function* streamChat(messages: Message[], sessionId?: string, _onli
     });
 
     if (!response.ok) {
+        // 422: attachment extraction failed — surface the backend's user-readable error directly
+        if (response.status === 422) {
+            const body = await response.text();
+            throw new Error(body);
+        }
+
         // Provide helpful error messages based on status code
         let errorMessage = `HTTP error! status: ${response.status}`;
 
         if (response.status === 502 || response.status === 503) {
             errorMessage = 'Model Not Ready: No model is currently loaded. Please go to the Models page and activate a model by clicking "Active Model".';
-        } else if (response.status === 503) {
-            errorMessage = 'Service Unavailable: Backend is still initializing. Please wait a moment and try again.';
         } else if (response.status === 504) {
             errorMessage = 'Gateway Timeout: The model took too long to respond. It may be too large for your hardware.';
         } else if (response.status === 404) {
@@ -337,11 +349,6 @@ export async function deleteConversation(id: string): Promise<boolean> {
         const response = await fetch(`${getApiBaseSync()}/conversations/${id}`, {
             method: 'DELETE',
         });
-        // 404 means conversation doesn't exist - treat as success
-        if (response.status === 404) {
-            console.warn(`Conversation [${id}] not found in backend, treating as deleted`);
-            return true;
-        }
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }

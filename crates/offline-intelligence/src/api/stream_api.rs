@@ -15,7 +15,6 @@ use axum::{
 use serde::Deserialize;
 use std::convert::Infallible;
 use tracing::{info, error, debug, warn};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::Value;
 use reqwest;
 use std::sync::Arc;
@@ -23,19 +22,41 @@ use std::sync::Arc;
 use crate::memory::Message;
 use crate::memory_db::schema::Embedding;
 use crate::shared_state::UnifiedAppState;
-use crate::utils::extract_content_from_bytes;
+use crate::utils::{extract_content_from_bytes, estimate_tokens, truncate_to_budget};
 use regex::Regex;
 
-/// Inline file attachment sent with the request (temporary, in-memory only)
+lazy_static::lazy_static! {
+    /// Matches legacy `[Attached: filename]` markers in user message text.
+    static ref ATTACHED_RE: Regex = Regex::new(r"\[Attached: ([^\]]+)\]").unwrap();
+    /// Matches legacy `@filename.ext` references in user message text.
+    /// NOTE: must NOT be run on messages that have already had file content injected.
+    static ref AT_FILE_RE: Regex = Regex::new(r"@(\S+\.\w+)").unwrap();
+}
+
+/// File attachment reference sent with the chat request.
+///
+/// Two sources are supported:
+/// - `inline` (paperclip): a real OS file path from the Tauri file dialog.
+///   Backend reads the file from disk and extracts text server-side.
+/// - `local_storage` (@filename / folder icon): an `all_files_id` pointing to
+///   a file saved in the user's persistent Local Storage. Backend reads from
+///   the `all_files` table directly.
+///
+/// A 64k-token budget is applied across ALL attachments in a single request.
+/// No file content bytes travel over HTTP — only file references.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatAttachment {
     pub name: String,
+    /// "inline" (paperclip) or "local_storage" (@filename / folder icon)
+    pub source: String,
+    /// OS file path — required when source == "inline"
     #[serde(default)]
-    pub content_base64: Option<String>,
+    pub file_path: Option<String>,
+    /// Database ID in `all_files` table — required when source == "local_storage"
     #[serde(default)]
-    pub content_text: Option<String>,
+    pub all_files_id: Option<i64>,
     #[serde(default)]
-    pub mime_type: Option<String>,
+    pub size_bytes: Option<i64>,
 }
 
 /// Request body matching what the frontend sends
@@ -63,84 +84,172 @@ fn default_max_tokens() -> u32 { 2000 }
 fn default_temperature() -> f32 { 0.7 }
 fn default_stream() -> bool { true }
 
-/// Process inline attachments and inject their content into the message
-async fn process_inline_attachments(messages: &mut Vec<Message>, attachments: &[ChatAttachment]) {
-    if attachments.is_empty() {
-        debug!("No attachments to process");
-        return;
-    }
-    
-    info!("Processing {} inline attachments", attachments.len());
-    
-    // Build attachment content block
-    let mut attachment_content = String::new();
-    for attach in attachments {
-        info!("Processing attachment: {} (has_text: {}, has_base64: {})", 
-            attach.name, 
-            attach.content_text.is_some(), 
-            attach.content_base64.is_some());
-        
-        let content = if let Some(ref text) = attach.content_text {
-            // Plain text content
-            info!("Using text content for {}, length: {}", attach.name, text.len());
-            text.clone()
-        } else if let Some(ref b64) = attach.content_base64 {
-            // Base64 encoded content - decode and extract based on file type
-            info!("Decoding base64 for {}, length: {}", attach.name, b64.len());
-            match BASE64.decode(b64) {
-                Ok(bytes) => {
-                    info!("Decoded {} bytes for {}", bytes.len(), attach.name);
-                    // Use the content extractor for proper file type handling
-                    match extract_content_from_bytes(&bytes, &attach.name).await {
-                        Ok(extracted) => {
-                            info!("Extracted {} chars from {}", extracted.len(), attach.name);
-                            // Check if the extracted content indicates an error
-                            if extracted.starts_with("[Could not extract") || extracted.starts_with("[PDF file appears to be empty") {
-                                warn!("File extraction warning for {}: {}", attach.name, extracted);
-                                // For PDF files that couldn't be processed, provide more helpful message
-                                if attach.name.to_lowercase().ends_with(".pdf") {
-                                    format!("[PDF file attached: {} - Content could not be extracted. The PDF may be password-protected, scanned images only, or corrupted.]", attach.name)
-                                } else {
-                                    extracted
-                                }
-                            } else {
-                                extracted
-                            }
-                        }
-                        Err(e) => {
-                            debug!("Failed to extract content from {}: {}", attach.name, e);
-                            // For PDF files that failed to process, provide more specific error message
-                            if attach.name.to_lowercase().ends_with(".pdf") {
-                                format!("[PDF file attached: {} - Could not extract text content: {}]", attach.name, e)
-                            } else {
-                                // Fallback to UTF-8 lossy for unknown formats
-                                String::from_utf8_lossy(&bytes).to_string()
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    debug!("Base64 decode failed for {}: {}", attach.name, e);
-                    format!("[Could not decode file: {}]", attach.name)
-                }
+/// Maximum combined token budget for all file attachments in a single request.
+/// Prevents context window overflow for both local LLM and OpenRouter modes.
+const MAX_ATTACHMENT_TOKENS: usize = 64_000;
+
+/// Returns true when `file_processor` returned a sentinel error string instead of
+/// real content. Sentinels always start with `[` and describe a failure.
+fn is_extraction_sentinel(s: &str) -> bool {
+    s.starts_with("[Could not")
+        || s.starts_with("[PDF")
+        || s.starts_with("[DOCX")
+        || s.starts_with("[Spreadsheet")
+        || s.starts_with("[Presentation")
+        || s.starts_with("[ODT")
+}
+
+/// Extract text from a single attachment. Returns an error string suitable for
+/// display to the user if anything goes wrong — no silent fallbacks.
+///
+/// Sources:
+///   - `source == "inline"` + `file_path`        → read from OS disk, extract text
+///   - `source == "local_storage"` + `all_files_id` → read from all_files DB table
+async fn try_extract_attachment(
+    attach: &ChatAttachment,
+    state: &UnifiedAppState,
+) -> Result<(String, String), String> {
+    match attach.source.as_str() {
+        "inline" => {
+            let path = attach.file_path.as_deref().ok_or_else(|| {
+                format!("'{}': no file path provided. Use the paperclip button to attach files.", attach.name)
+            })?;
+
+            info!("Reading inline file: {} ({})", attach.name, path);
+            let bytes = tokio::fs::read(path).await.map_err(|e| {
+                format!(
+                    "Could not read '{}': {}.\n\nMake sure the file exists and is not stored only in the cloud (OneDrive, iCloud, etc.).",
+                    attach.name, e
+                )
+            })?;
+
+            info!("Read {} bytes from '{}'", bytes.len(), attach.name);
+            let content = extract_content_from_bytes(&bytes, &attach.name)
+                .await
+                .map_err(|e| format!("Could not parse '{}': {}", attach.name, e))?;
+
+            // file_processor returns sentinel strings (not Err) on extraction failure.
+            // Catch all of them so no format silently passes empty/error text to the LLM.
+            if is_extraction_sentinel(&content) {
+                return Err(if attach.name.to_lowercase().ends_with(".pdf") {
+                    format!(
+                        "Could not extract text from '{}'.\n\nThe PDF is likely image-based (scanned) or password-protected. \
+                        Try one of:\n  • Export/re-save as a text-based PDF\n  • Attach a DOCX version\n  • Paste the text directly into the chat",
+                        attach.name
+                    )
+                } else {
+                    format!(
+                        "Could not extract text from '{}'.\n\nThe file may be corrupted or in an unsupported format. \
+                        Try a different format, or paste the content directly into the chat.",
+                        attach.name
+                    )
+                });
             }
-        } else {
-            info!("Attachment {} has no content", attach.name);
-            continue;
-        };
-        
-        attachment_content.push_str(&format!(
+
+            if content.trim().is_empty() {
+                return Err(format!("'{}' appears to be empty — no text content found.", attach.name));
+            }
+
+            info!("Extracted {} chars from '{}'", content.len(), attach.name);
+            Ok((attach.name.clone(), content))
+        }
+
+        "local_storage" => {
+            let id = attach.all_files_id.ok_or_else(|| {
+                format!("'{}': no database ID provided for local storage attachment.", attach.name)
+            })?;
+
+            info!("Reading local_storage file: {} (id={})", attach.name, id);
+            let all_files = &state.shared_state.database_pool.all_files;
+
+            // Read raw bytes so binary formats (DOCX, XLSX, PDF, PPTX) can be
+            // properly parsed — not just lossy-decoded as text.
+            let bytes = all_files.get_file_bytes(id).map_err(|e| {
+                format!(
+                    "Could not read '{}' from local storage: {}.\n\nTry re-adding the file through the local storage panel.",
+                    attach.name, e
+                )
+            })?;
+
+            info!("Read {} bytes from local_storage '{}'", bytes.len(), attach.name);
+
+            let content = extract_content_from_bytes(&bytes, &attach.name)
+                .await
+                .map_err(|e| format!("Could not parse '{}': {}", attach.name, e))?;
+
+            // Catch sentinel error strings returned by file_processor on extraction failure.
+            if is_extraction_sentinel(&content) {
+                return Err(if attach.name.to_lowercase().ends_with(".pdf") {
+                    format!(
+                        "Could not extract text from '{}'.\n\nThe PDF is likely image-based (scanned) or password-protected. \
+                        Try one of:\n  • Export/re-save as a text-based PDF\n  • Attach a DOCX version\n  • Paste the text directly into the chat",
+                        attach.name
+                    )
+                } else {
+                    format!(
+                        "Could not extract text from '{}'.\n\nThe file may be corrupted or in an unsupported format. \
+                        Try a different format, or paste the content directly into the chat.",
+                        attach.name
+                    )
+                });
+            }
+
+            let _ = all_files.record_access(id);
+
+            if content.trim().is_empty() {
+                return Err(format!("'{}' from local storage appears to be empty.", attach.name));
+            }
+
+            info!("Extracted {} chars from local_storage '{}'", content.len(), attach.name);
+            Ok((attach.name.clone(), content))
+        }
+
+        other => Err(format!(
+            "'{}': unknown attachment source '{}'. Use the paperclip button (inline) or the local storage panel to attach files.",
+            attach.name, other
+        )),
+    }
+}
+
+/// Inject extracted file contents into the last user message with a 64k token budget.
+/// Oversized files are truncated with a notice.
+fn inject_attachment_contents(messages: &mut Vec<Message>, contents: Vec<(String, String)>) {
+    let total_tokens: usize = contents.iter().map(|(_, c)| estimate_tokens(c)).sum();
+    info!("Attachment total: {} tokens across {} file(s)", total_tokens, contents.len());
+
+    let final_contents: Vec<(String, String)> = if total_tokens > MAX_ATTACHMENT_TOKENS {
+        let budget_per_file = MAX_ATTACHMENT_TOKENS / contents.len().max(1);
+        info!("Applying 64k budget: {} tokens/file", budget_per_file);
+        contents.into_iter().map(|(name, content)| {
+            let (truncated, was_cut) = truncate_to_budget(&content, budget_per_file);
+            let final_content = if was_cut {
+                let original_tokens = estimate_tokens(&content);
+                format!(
+                    "{}\n[File truncated: showing first ~{} tokens of ~{} total]",
+                    truncated, budget_per_file, original_tokens
+                )
+            } else {
+                truncated
+            };
+            (name, final_content)
+        }).collect()
+    } else {
+        contents
+    };
+
+    let mut block = String::new();
+    for (name, content) in &final_contents {
+        block.push_str(&format!(
             "\n--- Content of attached file: {} ---\n{}\n--- End of file ---\n",
-            attach.name, content
+            name, content
         ));
     }
-    
-    // Append to last user message
+
     if let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == "user") {
-        info!("Appending {} chars of attachment content to user message", attachment_content.len());
-        last_user.content = format!("{}\n{}", last_user.content, attachment_content);
+        info!("Injecting {} chars of attachment content into user message", block.len());
+        last_user.content = format!("{}\n{}", last_user.content, block);
     } else {
-        error!("No user message found to append attachments!");
+        error!("No user message found to inject attachment content into!");
     }
 }
 
@@ -150,41 +259,37 @@ async fn process_file_attachments(
     messages: &mut Vec<Message>,
     state: &UnifiedAppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Match both [Attached: filename] and @filename patterns
-    let attached_re = Regex::new(r"\[Attached: ([^\]]+)\]").unwrap();
-    let at_re = Regex::new(r"@(\S+\.\w+)").unwrap();
-
     let local_files = &state.shared_state.database_pool.local_files;
-    let all_files = &state.shared_state.database_pool.all_files;
 
     for msg in messages.iter_mut() {
         if msg.role == "user" {
-            let mut updated_content = msg.content.clone();
+            // Snapshot the original content for regex matching — we'll accumulate
+            // replacements into `updated_content` without re-matching on modified text.
+            let original = msg.content.clone();
+            let mut updated_content = original.clone();
 
-            // Process [Attached: filename] patterns
-            for cap in attached_re.captures_iter(&msg.content) {
-                if let Some(filename_match) = cap.get(1) {
-                    let filename = filename_match.as_str();
+            // Replace [Attached: filename] markers (legacy)
+            for cap in ATTACHED_RE.captures_iter(&original) {
+                if let Some(m) = cap.get(1) {
+                    let filename = m.as_str();
                     updated_content = replace_file_reference(
                         &updated_content,
                         &format!("[Attached: {}]", filename),
                         filename,
                         local_files,
-                        all_files,
                     ).await;
                 }
             }
 
-            // Process @filename patterns (reference to local files)
-            for cap in at_re.captures_iter(&msg.content) {
-                if let Some(filename_match) = cap.get(1) {
-                    let filename = filename_match.as_str();
+            // Replace @filename.ext references (legacy)
+            for cap in AT_FILE_RE.captures_iter(&original) {
+                if let Some(m) = cap.get(1) {
+                    let filename = m.as_str();
                     updated_content = replace_file_reference(
                         &updated_content,
                         &format!("@{}", filename),
                         filename,
                         local_files,
-                        all_files,
                     ).await;
                 }
             }
@@ -197,60 +302,70 @@ async fn process_file_attachments(
 }
 
 /// Helper to replace a file reference with actual content.
-/// Tries all_files first (user local storage), then local_files, then filesystem fallback.
+///
+/// Uses `get_file_content` (raw bytes) + `extract_content_from_bytes` so binary formats
+/// (DOCX, XLSX, PDF, PPTX) are correctly parsed rather than returning garbage text.
 async fn replace_file_reference(
     content: &str,
     marker: &str,
     filename: &str,
     local_files: &crate::memory_db::LocalFilesStore,
-    all_files: &crate::memory_db::AllFilesStore,
 ) -> String {
-    // 1. Try all_files store first (primary user local storage)
-    if let Ok(file) = all_files.get_file_by_name(filename) {
-        match all_files.get_file_content_string(file.id) {
-            Ok(file_content) => {
-                let _ = all_files.record_access(file.id);
-                let attachment_text = format!(
-                    "\n--- Content of file: {} ---\n{}\n--- End of file ---\n",
-                    filename, file_content
-                );
-                return content.replace(marker, &attachment_text);
+    // Try to find the file by name in the local_files database.
+    match local_files.get_file_by_name(filename) {
+        Ok(file) => {
+            // Read raw bytes — binary-safe for all formats (DOCX, XLSX, PDF, etc.)
+            match local_files.get_file_content(file.id) {
+                Ok(bytes) => {
+                    match extract_content_from_bytes(&bytes, filename).await {
+                        Ok(file_content) if !file_content.trim().is_empty() => {
+                            let attachment_text = format!(
+                                "\n--- Content of file: {} ---\n{}\n--- End of file ---\n",
+                                filename, file_content
+                            );
+                            content.replace(marker, &attachment_text)
+                        }
+                        _ => {
+                            let error_text = format!(
+                                "\n[Note: Could not extract text from '{}'. The file may be in an unsupported format.]",
+                                filename
+                            );
+                            content.replace(marker, &error_text)
+                        }
+                    }
+                }
+                Err(_) => {
+                    let error_text = format!(
+                        "\n[Note: Could not read file '{}'. File may be missing or corrupted.]",
+                        filename
+                    );
+                    content.replace(marker, &error_text)
+                }
             }
-            Err(_) => {}
-        }
-    }
-
-    // 2. Try local_files store (legacy small-files store)
-    if let Ok(file) = local_files.get_file_by_name(filename) {
-        match local_files.get_file_content_string(file.id) {
-            Ok(file_content) => {
-                let attachment_text = format!(
-                    "\n--- Content of file: {} ---\n{}\n--- End of file ---\n",
-                    filename, file_content
-                );
-                return content.replace(marker, &attachment_text);
-            }
-            Err(_) => {}
-        }
-    }
-
-    // 3. Filesystem fallback for backward compatibility
-    let app_data_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Aud.io");
-    let file_path = app_data_dir.join(filename);
-
-    match crate::utils::extract_file_content(&file_path).await {
-        Ok(file_content) => {
-            let attachment_text = format!(
-                "\n--- Content of file: {} ---\n{}\n--- End of file ---\n",
-                filename, file_content
-            );
-            content.replace(marker, &attachment_text)
         }
         Err(_) => {
-            let error_text = format!("\n[Note: File '{}' not found. Upload it to Local Storage first.]", filename);
-            content.replace(marker, &error_text)
+            // Filesystem fallback for files not yet in the database (backward compatibility).
+            let app_data_dir = dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("Aud.io");
+            let file_path = app_data_dir.join(filename);
+
+            match crate::utils::extract_file_content(&file_path).await {
+                Ok(file_content) => {
+                    let attachment_text = format!(
+                        "\n--- Content of file: {} ---\n{}\n--- End of file ---\n",
+                        filename, file_content
+                    );
+                    content.replace(marker, &attachment_text)
+                }
+                Err(_) => {
+                    let error_text = format!(
+                        "\n[Note: File '{}' not found in local files. Upload it first or check the filename.]",
+                        filename
+                    );
+                    content.replace(marker, &error_text)
+                }
+            }
         }
     }
 }
@@ -268,15 +383,20 @@ pub async fn generate_stream(
     let request_num = state.shared_state.counters.inc_total_requests();
     info!("Stream request #{} for session: {}", request_num, req.session_id);
     
-    // Debug: Log attachment info
+    // Log attachment info
     if let Some(ref attachments) = req.attachments {
-        info!("Request has {} attachments", attachments.len());
+        info!("Request has {} attachment(s)", attachments.len());
         for (i, att) in attachments.iter().enumerate() {
-            info!("  Attachment {}: name={}, has_text={}, has_base64={}", 
-                i, att.name, att.content_text.is_some(), att.content_base64.is_some());
+            info!(
+                "  Attachment {}: name={}, source={}, file_path={}, all_files_id={}",
+                i, att.name,
+                att.source,
+                att.file_path.as_deref().unwrap_or("(none)"),
+                att.all_files_id.map(|id| id.to_string()).unwrap_or_else(|| "(none)".to_string()),
+            );
         }
     } else {
-        info!("Request has NO attachments (None)");
+        debug!("Request has no attachments");
     }
 
     if req.messages.is_empty() {
@@ -287,16 +407,59 @@ pub async fn generate_stream(
 
     // 1. Process file attachments in the messages
     let mut processed_messages = req.messages.clone();
-    
-    // 1a. Process inline attachments (temporary, in-memory)
-    if let Some(ref attachments) = req.attachments {
-        process_inline_attachments(&mut processed_messages, attachments).await;
-    }
-    
-    // 1b. Process file references (@filename, [Attached: filename]) from local files
+
+    // 1a. FIRST: Replace legacy @filename / [Attached: filename] text references with real content.
+    //     This MUST run before inject_attachment_contents so that regex patterns inside injected
+    //     file blocks (e.g. `@pytest.fixture` in a Python file, `@media` in CSS, email addresses)
+    //     are never incorrectly matched and corrupted.
     if let Err(e) = process_file_attachments(&mut processed_messages, &state).await {
-        error!("Error processing file attachments: {}", e);
-        // Continue with current messages if file processing fails
+        error!("Error processing legacy file text references: {}", e);
+        // Continue — text-ref processing failure is non-fatal; structured attachments are handled below.
+    }
+
+    // 1b. THEN: Extract and inject structured attachments (paperclip inline + local_storage folder icon).
+    //     Runs after legacy text-ref processing to prevent cross-contamination.
+    //     Fail fast — return HTTP 422 if ANY attachment cannot be read or parsed.
+    //     A 64k-token budget is shared across all attachments before injection.
+    if let Some(ref attachments) = req.attachments {
+        if !attachments.is_empty() {
+            let mut extracted: Vec<(String, String)> = Vec::with_capacity(attachments.len());
+            let mut errors: Vec<String> = Vec::new();
+
+            for attach in attachments {
+                // Fast path: check the pre-extraction cache populated by
+                // `POST /attachments/preprocess` (fires when user attaches a file).
+                // `remove()` evicts the entry after use — the content is only
+                // needed once (for this request's context window injection).
+                let cache_key = crate::api::attachment_api::attachment_cache_key(attach);
+                if let Some((_, cached)) = state.shared_state.attachment_cache.remove(&cache_key) {
+                    if !cached.is_stale(crate::api::attachment_api::CACHE_TTL_SECS) {
+                        info!("Attachment cache hit for '{}' — skipping extraction", attach.name);
+                        extracted.push((attach.name.clone(), cached.text));
+                        continue;
+                    }
+                    info!("Stale cache entry for '{}' — re-extracting", attach.name);
+                }
+
+                // Slow path: extract now (user sent before pre-extraction finished,
+                // or pre-extraction failed silently).
+                match try_extract_attachment(attach, &state).await {
+                    Ok(content) => extracted.push(content),
+                    Err(e) => {
+                        warn!("Attachment extraction failed for '{}': {}", attach.name, e);
+                        errors.push(e);
+                    }
+                }
+            }
+
+            if !errors.is_empty() {
+                let error_msg = errors.join("\n\n");
+                error!("Rejecting request — {} attachment(s) could not be processed", errors.len());
+                return (StatusCode::UNPROCESSABLE_ENTITY, error_msg).into_response();
+            }
+
+            inject_attachment_contents(&mut processed_messages, extracted);
+        }
     }
 
     // 2. Get or create session in shared memory (zero-cost Arc lookup)
@@ -313,7 +476,11 @@ pub async fn generate_stream(
     // 4. Ensure session exists in database and persist user message
     //    CRITICAL: This must complete BEFORE title updates can happen, so we do it synchronously
     //    to avoid race conditions where title update happens before session creation completes
-    let user_msg_content = processed_messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone());
+    //
+    //    Use the ORIGINAL request messages (pre-injection) for DB storage so conversation history
+    //    shows the clean user text + optional [Attached files: ...] annotation only — NOT the huge
+    //    injected file content that was added to processed_messages for the LLM context window.
+    let user_msg_content = req.messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone());
     if let Some(ref content) = user_msg_content {
         let db = state.shared_state.database_pool.clone();
         let sid = session_id.clone();
@@ -411,7 +578,7 @@ pub async fn generate_stream(
             "stream": true,
         });
         
-        match stream_openrouter_response(api_key, openrouter_request, session_id_for_persist.clone(), db_for_persist.clone(), context_messages.clone(), user_msg_for_embed.clone(), db_for_embed_persist.clone(), session_id_for_embed.clone()).await {
+        match stream_openrouter_response(api_key, openrouter_request, session_id_for_persist.clone(), db_for_persist.clone(), context_messages.clone(), user_msg_for_embed.clone(), db_for_embed_persist.clone(), session_id_for_embed.clone(), state.http_client.clone()).await {
             Ok(openrouter_stream) => {
                 // Wrap the OpenRouter stream to collect the full response for DB persistence
                 let output_stream = async_stream::stream! {
@@ -483,7 +650,11 @@ pub async fn generate_stream(
     } else {
         // Handle local model (existing logic)
         // First check if the runtime is ready before attempting to stream
-        if !state.llm_worker.is_runtime_ready().await {
+        let runtime_ready = state.llm_worker.is_runtime_ready().await;
+        info!("Offline mode: runtime_ready check = {}", runtime_ready);
+        
+        if !runtime_ready {
+            info!("Model not ready - returning error");
             return (StatusCode::SERVICE_UNAVAILABLE, 
                 "Model Not Ready: No local model is currently loaded. Please go to the Models page and activate a model by clicking \"Active Model\".").into_response();
         }
@@ -666,11 +837,11 @@ async fn stream_openrouter_response(
     _user_msg_for_embed: Option<String>,
     _db_for_embed_persist: Arc<crate::memory_db::MemoryDatabase>,
     _session_id_for_embed: String,
+    client: reqwest::Client,
 ) -> Result<
-    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<String, anyhow::Error>> + Send>>, 
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<String, anyhow::Error>> + Send>>,
     anyhow::Error
 > {
-    let client = reqwest::Client::new();
     
     let response = client
         .post("https://openrouter.ai/api/v1/chat/completions")
@@ -704,7 +875,9 @@ async fn stream_openrouter_response(
 
             while let Some(newline_pos) = buffer.find('\n') {
                 let line = buffer[..newline_pos].trim().to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
+                // drain() removes bytes in-place without reallocating the buffer,
+                // avoiding an O(n) String copy on every newline.
+                buffer.drain(..=newline_pos);
 
                 if line.is_empty() {
                     continue;

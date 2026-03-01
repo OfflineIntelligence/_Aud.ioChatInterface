@@ -91,6 +91,26 @@ struct OpenRouterModelsResponse {
     data: Vec<OpenRouterModel>,
 }
 
+/// Pricing block returned by the OpenRouter /models API.
+/// Free models have both fields as the string "0".
+#[derive(Debug, Deserialize, Default)]
+struct OpenRouterPricing {
+    /// Cost per prompt token as a string, e.g. "0" for free.
+    #[serde(default)]
+    prompt: String,
+    /// Cost per completion token as a string, e.g. "0" for free.
+    #[serde(default)]
+    completion: String,
+}
+
+impl OpenRouterPricing {
+    /// Returns true when both prompt and completion are zero-cost.
+    fn is_free(&self) -> bool {
+        (self.prompt == "0" || self.prompt.is_empty())
+            && (self.completion == "0" || self.completion.is_empty())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenRouterModel {
     id: String,
@@ -99,6 +119,9 @@ struct OpenRouterModel {
     context_length: Option<u64>,
     #[serde(default)]
     architecture: Option<OpenRouterArchitecture>,
+    /// Pricing info — present in the live API but optional for backwards compat.
+    #[serde(default)]
+    pricing: Option<OpenRouterPricing>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -190,6 +213,19 @@ impl ModelRegistry {
 
         for m in body.data.into_iter() {
             let plain_id = m.id.clone();
+
+            // ── Free-model gate ────────────────────────────────────────────────
+            // Only expose models that are free to use with an API key.
+            // A model is free when:
+            //   • The pricing block says both prompt and completion cost "0", OR
+            //   • The model ID ends with ":free" (OpenRouter's explicit free suffix).
+            let is_free_by_pricing = m.pricing.as_ref().map_or(false, |p| p.is_free());
+            let is_free_by_id      = plain_id.ends_with(":free");
+            if !is_free_by_pricing && !is_free_by_id {
+                continue; // paid model — skip
+            }
+            // ──────────────────────────────────────────────────────────────────
+
             let registry_id = format!("openrouter:{}", plain_id);
             openrouter_ids.insert(registry_id.clone());
 
@@ -204,6 +240,7 @@ impl ModelRegistry {
                 "api".to_string(),
                 "online".to_string(),
                 "cloud".to_string(),
+                "free".to_string(),   // confirmed free-tier
             ];
             if !provider.is_empty() {
                 tags.push(format!("provider:{}", provider));

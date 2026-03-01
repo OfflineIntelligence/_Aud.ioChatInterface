@@ -40,6 +40,7 @@ const HelpFeedbackPanel: React.FC<HelpFeedbackPanelProps> = ({ isOpen, onClose, 
       });
       const data = await res.json();
       if (data.success) {
+        localStorage.setItem('aud-io-feedback-given', 'true');
         setSubmitted(true);
         setFeedback('');
         setEmail('');

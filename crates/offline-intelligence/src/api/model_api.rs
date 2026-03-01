@@ -312,29 +312,47 @@ pub async fn get_active_model(
     State(state): State<UnifiedAppState>,
 ) -> Json<ActiveModelResponse> {
     let config = &state.shared_state.config;
-    let model_path = &config.model_path;
 
-    // Extract a human-readable name from the model file path
+    // Prefer the runtime's live config (populated when a model is auto-loaded or
+    // activated via the UI) over the static startup config, which may be empty.
+    //
+    // The lock guard (RwLockReadGuard) is NOT Send, so it must be fully dropped
+    // before any .await call.  We clone the Arc inside a synchronous block, then
+    // call the async method outside that block.
+    let runtime_arc = state.shared_state.runtime_manager
+        .read()
+        .ok()
+        .and_then(|g| g.clone()); // guard dropped at end of this expression
+
+    let runtime_model_path: Option<String> = if let Some(rm) = runtime_arc {
+        rm.get_current_config().await
+            .map(|c| c.model_path.to_string_lossy().to_string())
+            .filter(|p| !p.is_empty())
+    } else {
+        None
+    };
+
+    let model_path = runtime_model_path
+        .as_deref()
+        .unwrap_or(&config.model_path);
+
     let model_name = std::path::Path::new(model_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
 
-    // Detect format from extension
     let format = std::path::Path::new(model_path)
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_uppercase();
 
-    // Check if the model file actually exists
     let file_exists = std::path::Path::new(model_path).exists();
-
     let status = if file_exists { "loaded" } else { "not_found" }.to_string();
 
     Json(ActiveModelResponse {
-        model_path: model_path.clone(),
+        model_path: model_path.to_string(),
         model_name,
         format,
         context_size: config.ctx_size,

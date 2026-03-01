@@ -19,7 +19,7 @@ pub use summary_store::SummaryStore;
 pub use embedding_store::{EmbeddingStore, EmbeddingStats};
 pub use local_files_store::{LocalFilesStore, LocalFile, LocalFileTree};
 pub use all_files_store::{AllFilesStore, AllFile, AllFileTree};
-pub use api_keys_store::{ApiKeysStore, ApiKeyType, ApiKeyRecord, SimpleEncryption};
+pub use api_keys_store::{ApiKeysStore, ApiKeyType, ApiKeyRecord};
 pub use users_store::{UsersStore, User};
 
 use std::path::Path;
@@ -76,34 +76,30 @@ impl MemoryDatabase {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Apply pragmas on EVERY connection from the pool.
-        // PRAGMA foreign_keys is per-connection in SQLite — without this, ON DELETE CASCADE
-        // is silently ignored on all connections except the first initialization one.
         let manager = SqliteConnectionManager::file(db_path)
             .with_flags(
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                 | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
                 | rusqlite::OpenFlags::SQLITE_OPEN_FULL_MUTEX,
-            )
-            .with_init(|conn| {
-                conn.execute_batch(
-                    "PRAGMA foreign_keys = ON;
-                     PRAGMA journal_mode = WAL;
-                     PRAGMA synchronous = NORMAL;
-                     PRAGMA busy_timeout = 5000;",
-                )
-            });
+            );
 
         let pool = Pool::builder()
             .max_size(10)
             .build(manager)
             .map_err(|e| anyhow::anyhow!("Failed to create connection pool: {}", e))?;
 
-        // Run schema migrations on startup
+        // Initialize DB and pragmas - FIXED: Use mutable connection
         {
             let mut conn = pool.get()?;
             let mut migrator = migration::MigrationManager::new(&mut conn);
             migrator.initialize_database()?;
+
+            conn.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA journal_mode = WAL;
+                 PRAGMA synchronous = NORMAL;
+                 PRAGMA busy_timeout = 5000;",
+            )?;
         }
 
         let pool = Arc::new(pool);

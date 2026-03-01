@@ -1,6 +1,7 @@
 //! Users Store - User authentication and management
 //!
-//! Stores user accounts with hashed passwords and email verification status.
+//! Stores user accounts with hashed passwords (email/password users) or Google OAuth.
+//! Google users have password_hash = "google-oauth-user" sentinel and email_verified = 1.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -21,6 +22,8 @@ pub struct User {
     pub verification_token: Option<String>,
     pub created_at: DateTime<Utc>,
     pub verified_at: Option<DateTime<Utc>>,
+    pub google_id: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 pub struct UsersStore {
@@ -55,6 +58,11 @@ impl UsersStore {
             )",
             [],
         )?;
+
+        // Idempotent migrations: ADD COLUMN silently fails if column already exists
+        let _ = conn.execute("ALTER TABLE users ADD COLUMN google_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE users ADD COLUMN avatar_url TEXT", []);
+
         info!("Users table initialized");
         Ok(())
     }
@@ -64,15 +72,14 @@ impl UsersStore {
         email: &str,
         name: &str,
         password_hash: &str,
-        verification_token: &str,
     ) -> Result<i64> {
         let conn = self.pool.get()?;
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
             "INSERT INTO users (email, name, password_hash, email_verified, verification_token, created_at)
-             VALUES (?1, ?2, ?3, 0, ?4, ?5)",
-            params![email, name, password_hash, verification_token, now],
+             VALUES (?1, ?2, ?3, 1, '', ?4)",
+            params![email, name, password_hash, now],
         )?;
 
         let id = conn.last_insert_rowid();
@@ -80,12 +87,109 @@ impl UsersStore {
         Ok(id)
     }
 
+    /// Create or update a Google OAuth user.
+    ///
+    /// Logic:
+    /// 1. Look up by `google_id` → update name/avatar, return existing user
+    /// 2. Look up by `email` → link Google account to existing user
+    /// 3. Otherwise → create a new Google user (no password)
+    /// Returns `(User, is_new_user)` where `is_new_user` is `true` only when a
+    /// brand-new account was created (Step 3 — never seen this Google ID or email).
+    pub fn upsert_google_user(
+        &self,
+        email: &str,
+        name: &str,
+        google_id: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<(User, bool)> {
+        let conn = self.pool.get()?;
+
+        let mut is_new_user = false;
+
+        // Step 1: find by google_id
+        let by_google_id = conn
+            .query_row(
+                "SELECT id FROM users WHERE google_id = ?1",
+                params![google_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+
+        if let Some(user_id) = by_google_id {
+            // Update name and avatar in case they changed in Google profile
+            conn.execute(
+                "UPDATE users SET name = ?1, avatar_url = ?2 WHERE id = ?3",
+                params![name, avatar_url, user_id],
+            )?;
+        } else {
+            // Step 2: find by email (account linking)
+            let by_email = conn
+                .query_row(
+                    "SELECT id FROM users WHERE email = ?1",
+                    params![email],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+
+            if let Some(user_id) = by_email {
+                // Link the Google account to the existing email/password account
+                conn.execute(
+                    "UPDATE users SET google_id = ?1, avatar_url = ?2, email_verified = 1 WHERE id = ?3",
+                    params![google_id, avatar_url, user_id],
+                )?;
+            } else {
+                // Step 3: brand-new Google user
+                let now = Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO users (email, name, password_hash, email_verified, google_id, avatar_url, created_at)
+                     VALUES (?1, ?2, 'google-oauth-user', 1, ?3, ?4, ?5)",
+                    params![email, name, google_id, avatar_url, now],
+                )?;
+                is_new_user = true;
+            }
+        }
+
+        // Fetch and return the final user record
+        let user = conn.query_row(
+            "SELECT id, email, name, password_hash, email_verified, verification_token,
+                    created_at, verified_at, google_id, avatar_url
+             FROM users WHERE email = ?1",
+            params![email],
+            |row| {
+                let created_str: String = row.get(6)?;
+                let verified_str: Option<String> = row.get(7)?;
+                Ok(User {
+                    id: row.get(0)?,
+                    email: row.get(1)?,
+                    name: row.get(2)?,
+                    password_hash: row.get(3)?,
+                    email_verified: row.get::<_, i32>(4)? != 0,
+                    verification_token: row.get(5)?,
+                    created_at: DateTime::parse_from_rfc3339(&created_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    verified_at: verified_str.and_then(|s| {
+                        DateTime::parse_from_rfc3339(&s)
+                            .ok()
+                            .map(|dt| dt.with_timezone(&Utc))
+                    }),
+                    google_id: row.get(8)?,
+                    avatar_url: row.get(9)?,
+                })
+            },
+        )?;
+
+        info!("Google user upserted: {} (new={})", email, is_new_user);
+        Ok((user, is_new_user))
+    }
+
     pub fn get_user_by_email(&self, email: &str) -> Result<Option<User>> {
         let conn = self.pool.get()?;
 
         let result = conn
             .query_row(
-                "SELECT id, email, name, password_hash, email_verified, verification_token, created_at, verified_at
+                "SELECT id, email, name, password_hash, email_verified, verification_token,
+                        created_at, verified_at, google_id, avatar_url
                  FROM users WHERE email = ?1",
                 params![email],
                 |row| {
@@ -107,6 +211,8 @@ impl UsersStore {
                                 .ok()
                                 .map(|dt| dt.with_timezone(&Utc))
                         }),
+                        google_id: row.get(8)?,
+                        avatar_url: row.get(9)?,
                     })
                 },
             )
@@ -120,7 +226,8 @@ impl UsersStore {
 
         let result = conn
             .query_row(
-                "SELECT id, email, name, password_hash, email_verified, verification_token, created_at, verified_at
+                "SELECT id, email, name, password_hash, email_verified, verification_token,
+                        created_at, verified_at, google_id, avatar_url
                  FROM users WHERE id = ?1",
                 params![id],
                 |row| {
@@ -142,6 +249,8 @@ impl UsersStore {
                                 .ok()
                                 .map(|dt| dt.with_timezone(&Utc))
                         }),
+                        google_id: row.get(8)?,
+                        avatar_url: row.get(9)?,
                     })
                 },
             )
@@ -163,8 +272,10 @@ impl UsersStore {
         if rows_affected > 0 {
             let user = conn
                 .query_row(
-                    "SELECT id, email, name, password_hash, email_verified, verification_token, created_at, verified_at
-                     FROM users WHERE verification_token IS NULL AND email_verified = 1 ORDER BY id DESC LIMIT 1",
+                    "SELECT id, email, name, password_hash, email_verified, verification_token,
+                            created_at, verified_at, google_id, avatar_url
+                     FROM users WHERE verification_token IS NULL AND email_verified = 1
+                     ORDER BY id DESC LIMIT 1",
                     [],
                     |row| {
                         let created_str: String = row.get(6)?;
@@ -185,6 +296,8 @@ impl UsersStore {
                                     .ok()
                                     .map(|dt| dt.with_timezone(&Utc))
                             }),
+                            google_id: row.get(8)?,
+                            avatar_url: row.get(9)?,
                         })
                     },
                 )

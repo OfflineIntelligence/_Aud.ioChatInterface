@@ -73,7 +73,7 @@ pub async fn switch_mode(
             }
 
             // Mark HuggingFace key as used in offline mode (if exists)
-            if let Ok(Some(_)) = state.shared_state.database_pool.api_keys.get_key(ApiKeyType::HuggingFace) {
+            if let Ok(Some(_)) = state.shared_state.database_pool.api_keys.get_key_plaintext(&ApiKeyType::HuggingFace) {
                 let _ = state.shared_state.database_pool.api_keys.mark_used(ApiKeyType::HuggingFace, "offline");
             }
 
@@ -108,7 +108,7 @@ pub async fn switch_mode(
 
             // Check if an OpenRouter key is stored; signal the frontend when missing
             let openrouter_key_exists = state.shared_state.database_pool.api_keys
-                .get_key(ApiKeyType::OpenRouter)
+                .get_key_plaintext(&ApiKeyType::OpenRouter)
                 .ok()
                 .flatten()
                 .is_some();
@@ -169,13 +169,13 @@ pub async fn get_mode_status(
 
     // Check if API keys are set
     let hf_token_set = state.shared_state.database_pool.api_keys
-        .get_key(ApiKeyType::HuggingFace)
+        .get_key_plaintext(&ApiKeyType::HuggingFace)
         .ok()
         .flatten()
         .is_some();
 
     let openrouter_key_set = state.shared_state.database_pool.api_keys
-        .get_key(ApiKeyType::OpenRouter)
+        .get_key_plaintext(&ApiKeyType::OpenRouter)
         .ok()
         .flatten()
         .is_some();

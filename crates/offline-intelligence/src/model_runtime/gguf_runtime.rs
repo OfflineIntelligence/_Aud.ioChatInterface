@@ -93,18 +93,27 @@ impl GGUFRuntime {
 
         info!("llama-server process started, waiting for health check...");
 
-        // Wait for server to be ready (up to 120 seconds)
-        for attempt in 1..=60 {
-            sleep(Duration::from_secs(2)).await;
-            
+        // Wait for server to be ready (up to 120 seconds) with exponential backoff.
+        // Checks at 100 ms → 200 ms → 400 ms → … → 2 s (cap) so a fast start is
+        // detected in < 200 ms instead of the old fixed 2 s minimum.
+        let _start = std::time::Instant::now();
+        let mut delay_ms: u64 = 100;
+        let mut last_log_secs: u64 = 0;
+        loop {
+            sleep(Duration::from_millis(delay_ms)).await;
             if self.is_ready().await {
-                info!("✅ GGUF runtime ready after {} seconds", attempt * 2);
+                info!("✅ GGUF runtime ready after {:.1}s", _start.elapsed().as_secs_f64());
                 return Ok(());
             }
-            
-            if attempt % 10 == 0 {
-                info!("Still waiting for llama-server... ({}/120s)", attempt * 2);
+            let elapsed_secs = _start.elapsed().as_secs();
+            if elapsed_secs >= 120 {
+                break;
             }
+            if elapsed_secs >= last_log_secs + 10 {
+                info!("Still waiting for llama-server... ({}/120s)", elapsed_secs);
+                last_log_secs = elapsed_secs;
+            }
+            delay_ms = (delay_ms * 2).min(2_000);
         }
 
         Err(anyhow::anyhow!("llama-server failed to start within 120 seconds"))

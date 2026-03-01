@@ -63,11 +63,22 @@ pub async fn submit_feedback(
     )
 }
 
-fn save_feedback_locally(payload: &FeedbackRequest) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = std::path::Path::new("./data");
-    std::fs::create_dir_all(db_path)?;
+/// Returns the canonical Aud.io data directory used by all backend components.
+/// - Windows : `%APPDATA%\Aud.io\data`
+/// - macOS   : `~/Library/Application Support/Aud.io/data`
+/// - Linux   : `~/.local/share/Aud.io/data`
+fn aud_io_data_dir() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        .join("Aud.io")
+        .join("data")
+}
 
-    let conn = rusqlite::Connection::open(db_path.join("feedback.db"))?;
+fn save_feedback_locally(payload: &FeedbackRequest) -> Result<(), Box<dyn std::error::Error>> {
+    let db_dir = aud_io_data_dir();
+    std::fs::create_dir_all(&db_dir)?;
+
+    let conn = rusqlite::Connection::open(db_dir.join("feedback.db"))?;
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS feedback (
@@ -88,12 +99,7 @@ fn save_feedback_locally(payload: &FeedbackRequest) -> Result<(), Box<dyn std::e
 
 /// Get the next feedback number for sequential tracking
 fn get_next_feedback_number() -> u64 {
-    // Resolve path relative to executable directory for production
-    let base_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let counter_path = base_dir.join("data").join("feedback_counter.txt");
+    let counter_path = aud_io_data_dir().join("feedback_counter.txt");
     
     // Read current counter
     let current = if counter_path.exists() {
@@ -130,7 +136,7 @@ async fn send_feedback_email(payload: &FeedbackRequest) -> Result<u64, Box<dyn s
         return Err("SMTP credentials not configured".into());
     }
 
-    let smtp_host = std::env::var("SMTP_HOST").unwrap_or_else(|_| "smtp.gmail.com".to_string());
+    let smtp_host = std::env::var("SMTP_HOST").unwrap_or_else(|_| "smtp.hostinger.com".to_string());
     let smtp_port: u16 = std::env::var("SMTP_PORT")
         .unwrap_or_else(|_| "587".to_string())
         .parse()

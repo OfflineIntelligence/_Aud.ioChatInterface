@@ -129,6 +129,61 @@ export async function signupUser(name: string, email: string, password: string):
     }
 }
 
+// ─── Google OAuth ──────────────────────────────────────────────────────────────
+
+export interface GoogleStatusResponse {
+    pending: boolean;
+    success?: boolean;
+    message?: string;
+    token?: string;
+    user?: UserData & { avatar_url?: string };
+}
+
+/**
+ * Start a Google OAuth flow.
+ * Sends the backend port so it can construct the correct redirect_uri.
+ * Returns { auth_url, state } on success, null on failure.
+ */
+export async function initiateGoogleLogin(
+    port: number
+): Promise<{ auth_url: string; state: string } | null> {
+    try {
+        const response = await fetch(`${getApiBaseSync()}/auth/google/init`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ port }),
+        });
+        if (response.ok) {
+            const data = await response.json();
+            if (data.auth_url && data.state) return data;
+        }
+        return null;
+    } catch (e) {
+        console.error('Google OAuth init failed:', e);
+        return null;
+    }
+}
+
+/**
+ * Poll the backend to see if the Google OAuth flow has completed.
+ * Returns the full result when done, { pending: true } while waiting,
+ * or null on network error.
+ */
+export async function pollGoogleStatus(
+    state: string
+): Promise<GoogleStatusResponse | null> {
+    try {
+        const response = await fetch(
+            `${getApiBaseSync()}/auth/google/status?state=${encodeURIComponent(state)}`
+        );
+        if (response.ok) return (await response.json()) as GoogleStatusResponse;
+        return null;
+    } catch (e) {
+        console.error('Google status poll failed:', e);
+        return null;
+    }
+}
+
 export async function verifyEmail(token: string): Promise<AuthResponse> {
     try {
         const response = await fetch(`${getApiBaseSync()}/auth/verify-email`, {

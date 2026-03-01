@@ -56,17 +56,25 @@ impl TensorRTRuntime {
         self.server_process = Some(child);
         self.base_url = format!("http://{}:{}", config.host, config.port);
 
-        // Wait for server to be ready (up to 120 seconds)
-        for attempt in 1..=60 {
-            sleep(Duration::from_secs(2)).await;
+        // Wait for server to be ready (up to 120 seconds) with exponential backoff.
+        let _start = std::time::Instant::now();
+        let mut delay_ms: u64 = 100;
+        let mut last_log_secs: u64 = 0;
+        loop {
+            sleep(Duration::from_millis(delay_ms)).await;
             if self.is_ready().await {
-                info!("✅ TensorRT runtime ready after {} seconds", attempt * 2);
+                info!("✅ TensorRT runtime ready after {:.1}s", _start.elapsed().as_secs_f64());
                 return Ok(());
             }
-            
-            if attempt % 10 == 0 {
-                info!("Still waiting for TensorRT server... ({}/120s)", attempt * 2);
+            let elapsed_secs = _start.elapsed().as_secs();
+            if elapsed_secs >= 120 {
+                break;
             }
+            if elapsed_secs >= last_log_secs + 10 {
+                info!("Still waiting for TensorRT server... ({}/120s)", elapsed_secs);
+                last_log_secs = elapsed_secs;
+            }
+            delay_ms = (delay_ms * 2).min(2_000);
         }
 
         Err(anyhow::anyhow!("TensorRT server failed to start within 120 seconds"))

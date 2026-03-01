@@ -5,6 +5,6 @@ pub mod text_utils;
 pub mod topic_extractor;
 
 // Re-export commonly used utilities
-pub use file_processor::{extract_file_content, extract_content_from_bytes};
+pub use file_processor::{extract_file_content, extract_content_from_bytes, estimate_tokens, truncate_to_budget};
 pub use text_utils::TextUtils;
 pub use topic_extractor::TopicExtractor;

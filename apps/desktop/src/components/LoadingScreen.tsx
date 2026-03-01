@@ -49,42 +49,36 @@ export function LoadingScreen({ children }: LoadingScreenProps) {
           console.log(`[LoadingScreen] Response status: ${response.status}`);
 
           if (response.ok && response.status === 200) {
-            // Try to parse JSON response (new format)
+            // Fix: read the body once as text, then parse — avoids the
+            // "body already consumed" bug where response.text() returns ""
+            // after a failed response.json() call.
             try {
-              const data = await response.json();
-              console.log(`[LoadingScreen] Health data:`, data);
-              // Health check returns: {status: "ready"|"initializing"|"degraded", runtime_ready: boolean}
-
-              if (data.status === 'ready' || data.status === 'degraded' || data.status === 'initializing') {
-                // Backend is up - we can proceed
-                // Note: 'degraded' means no model loaded yet, but backend is ready
-                setStage('starting-backend');
-
-                // Additional small delay for UX smoothness
-                setTimeout(() => {
-                  setStage('ready');
-                  setIsReady(true);
-                }, 500);
-
-                if (interval) clearInterval(interval);
-                if (timeout) clearTimeout(timeout);
-                return;
-              }
-            } catch (parseError) {
-              console.warn('[LoadingScreen] JSON parse error:', parseError);
-              // Fallback: If JSON parsing fails, try text format (backward compatibility)
               const text = await response.text();
-              console.log(`[LoadingScreen] Response text: ${text}`);
-              if (text === 'OK') {
-                setStage('starting-backend');
-                setTimeout(() => {
-                  setStage('ready');
-                  setIsReady(true);
-                }, 500);
+              let accepted = false;
+              try {
+                const data = JSON.parse(text);
+                console.log(`[LoadingScreen] Health data:`, data);
+                // Health check returns: {status: "ready"|"initializing"|"degraded", runtime_ready: boolean}
+                if (data.status === 'ready' || data.status === 'degraded' || data.status === 'initializing') {
+                  accepted = true;
+                }
+              } catch {
+                // Not JSON — check plain text (backward compat with older backend)
+                console.log(`[LoadingScreen] Response text: ${text}`);
+                if (text.trim() === 'OK') {
+                  accepted = true;
+                }
+              }
+              if (accepted) {
+                // Backend is up — proceed immediately, no artificial delay
+                setStage('ready');
+                setIsReady(true);
                 if (interval) clearInterval(interval);
                 if (timeout) clearTimeout(timeout);
                 return;
               }
+            } catch (readError) {
+              console.warn('[LoadingScreen] Error reading response body:', readError);
             }
           }
 
@@ -102,9 +96,10 @@ export function LoadingScreen({ children }: LoadingScreenProps) {
         }
       };
 
-      // Check immediately, then every 500ms
+      // Check immediately, then every 100ms — fast enough to catch a ready
+      // backend within one poll cycle without flooding the process with requests.
       checkBackend();
-      interval = setInterval(checkBackend, 500);
+      interval = setInterval(checkBackend, 100);
 
       // Increased timeout to 180 seconds to accommodate engine initialization
       timeout = setTimeout(() => {

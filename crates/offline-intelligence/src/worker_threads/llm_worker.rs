@@ -125,11 +125,16 @@ impl LLMWorker {
 
     /// Check if runtime is ready for inference
     pub async fn is_runtime_ready(&self) -> bool {
-        if let Some(ref rm) = self.get_runtime_manager() {
-            rm.is_ready().await
+        let has_runtime_manager = self.runtime_manager.read().is_ok();
+        let result = if let Some(ref rm) = self.get_runtime_manager() {
+            let ready = rm.is_ready().await;
+            info!("LLMWorker is_ready: runtime_manager exists={}, is_ready={}", has_runtime_manager, ready);
+            ready
         } else {
+            info!("LLMWorker is_ready: no runtime_manager set");
             false
-        }
+        };
+        result
     }
 
     // Override the original methods to use runtime manager when available

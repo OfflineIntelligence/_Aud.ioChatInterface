@@ -41,21 +41,23 @@ fn default_temperature() -> f32 { 0.7 }
 fn default_stream() -> bool { true }
 
 /// POST /online/stream — Online mode streaming endpoint
-/// Connects directly to OpenRouter API and persists messages to SQLite.
+/// Connects directly to OpenRouter API
 pub async fn online_stream(
     State(state): State<UnifiedAppState>,
     Json(req): Json<OnlineStreamRequest>,
 ) -> Response {
     info!("Online stream request for session: {}", req.session_id);
 
-    debug!("Request api_key present: {}, length: {}",
-        req.api_key.is_some(),
+    // Debug: Log what we received
+    debug!("Request api_key present: {}, length: {}", 
+        req.api_key.is_some(), 
         req.api_key.as_ref().map(|k| k.len()).unwrap_or(0)
     );
 
     // Get OpenRouter API key - prioritize the one passed in request
     let api_key = req.api_key.clone().unwrap_or_else(|| {
         std::env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
+            // Try to get from state or config
             state.shared_state.config.openrouter_api_key.clone()
         })
     });
@@ -65,39 +67,6 @@ pub async fn online_stream(
     if api_key.is_empty() {
         error!("OpenRouter API key is empty - request had key: {}", req.api_key.is_some());
         return (StatusCode::UNAUTHORIZED, "OpenRouter API key not configured").into_response();
-    }
-
-    // -------------------------------------------------------------------------
-    // Database persistence: ensure session exists and store the user message.
-    // The assistant message is stored after streaming completes (inside the SSE
-    // stream generator so it runs before the HTTP response body is closed).
-    // -------------------------------------------------------------------------
-    let db = state.shared_state.database_pool.clone();
-    let session_id = req.session_id.clone();
-    let msg_count = req.messages.len() as i32; // used to derive message indices
-
-    // Create session if it doesn't already exist (INSERT OR IGNORE equivalent)
-    if let Err(e) = db.conversations.create_session_with_id(&session_id, None) {
-        debug!("Session creation (may already exist): {}", e);
-    }
-
-    // Store the user message (last message in the request) in a background task
-    let user_msg_content = req.messages.iter().rev()
-        .find(|m| m.role == "user")
-        .map(|m| m.content.clone());
-    if let Some(ref content) = user_msg_content {
-        let db_bg = db.clone();
-        let sid_bg = session_id.clone();
-        let content_bg = content.clone();
-        let user_idx = msg_count - 1; // 0-based position of the current user message
-        tokio::spawn(async move {
-            if let Err(e) = db_bg.conversations.store_messages_batch(
-                &sid_bg,
-                &[("user".to_string(), content_bg, user_idx, 0, 0.5)],
-            ) {
-                error!("Failed to persist online user message: {}", e);
-            }
-        });
     }
 
     // Prepare messages in OpenRouter format
@@ -140,13 +109,8 @@ pub async fn online_stream(
 
             let byte_stream = resp.bytes_stream();
 
-            // Clones moved into the stream generator for post-stream persistence
-            let db_persist = db.clone();
-            let sid_persist = session_id.clone();
-
             let sse_stream = async_stream::stream! {
                 let mut buffer = String::new();
-                let mut full_response = String::new(); // accumulate for DB persistence
 
                 futures_util::pin_mut!(byte_stream);
 
@@ -164,26 +128,14 @@ pub async fn online_stream(
                                 }
 
                                 if line.starts_with("data: ") {
-                                    let data = line[6..].to_string();
+                                    let data = &line[6..];
 
                                     if data == "[DONE]" {
                                         yield Ok::<_, Infallible>(Event::default().data("[DONE]"));
-                                        // Don't return — break so the persistence code below runs
-                                        break;
+                                        return;
                                     }
 
-                                    // Collect assistant content tokens for persistence
-                                    if let Ok(parsed) = serde_json::from_str::<Value>(&data) {
-                                        if let Some(content) = parsed
-                                            .get("choices").and_then(|c| c.get(0))
-                                            .and_then(|c| c.get("delta"))
-                                            .and_then(|d| d.get("content"))
-                                            .and_then(|c| c.as_str())
-                                        {
-                                            full_response.push_str(content);
-                                        }
-                                    }
-
+                                    // Forward the data as-is to the client
                                     yield Ok(Event::default().data(data));
                                 }
                             }
@@ -195,20 +147,6 @@ pub async fn online_stream(
                             ));
                             break;
                         }
-                    }
-                }
-
-                // Persist the complete assistant response to SQLite once streaming is done.
-                // This runs before the HTTP response body closes, so the frontend always
-                // waits for this before reader.read() returns done=true.
-                if !full_response.is_empty() {
-                    let assistant_idx = msg_count; // slot immediately after all request messages
-                    match db_persist.conversations.store_messages_batch(
-                        &sid_persist,
-                        &[("assistant".to_string(), full_response, assistant_idx, 0, 0.5)],
-                    ) {
-                        Ok(_) => debug!("Persisted online assistant response for session {}", sid_persist),
-                        Err(e) => error!("Failed to persist online assistant message: {}", e),
                     }
                 }
             };

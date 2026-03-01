@@ -1,51 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useTheme } from '../contexts/ThemeContext';
 import { useAuth } from '../contexts/AuthContext';
+import { useApiKeys } from '../contexts/ApiKeyContext';
 import { getApiBaseSync } from '../api/backendUrl';
-import { ArrowLeft, Send, CheckCircle, MessageSquare, HardDrive, Key } from 'lucide-react';
-import { showOpenRouterApiKeyModal, showHuggingFaceApiKeyModal } from './ModelsPanel';
-import { getAllApiKeys } from '../api/apiKeys';
+import { ArrowLeft, Send, CheckCircle, MessageSquare, HardDrive, Key, Eye, EyeOff } from 'lucide-react';
 
 const SettingsPanel: React.FC<{
   isOpen: boolean;
   onClose: () => void;
   onOpenModels?: (focusApiKey?: boolean, focusHfToken?: boolean) => void;
-  onOpenRouterApiKeyChange?: (key: string) => void;
-  onHuggingFaceTokenChange?: (token: string) => void;
   onOpenStorage?: () => void;
-}> = ({ isOpen, onClose, onOpenModels, onOpenRouterApiKeyChange, onHuggingFaceTokenChange, onOpenStorage }) => {
+}> = ({ isOpen, onClose, onOpenModels, onOpenStorage }) => {
   const { theme, toggleTheme } = useTheme();
-  const { user, setApiKey } = useAuth();
+  const { user } = useAuth();
 
-  // Live API key presence indicators
-  const [apiKeyStatus, setApiKeyStatus] = useState<{ openrouter: boolean; huggingface: boolean }>({
-    openrouter: !!(localStorage.getItem('aud-io-openrouter-key')),
-    huggingface: !!(localStorage.getItem('aud-io-hf-token')),
-  });
+  // Single source of truth — any key saved here is immediately reflected in
+  // ModelsPanel (and vice versa) without polling or setTimeout.
+  const { openRouterApiKey, hfToken, setOpenRouterApiKey, setHfToken } = useApiKeys();
 
-  const refreshApiKeyStatus = () => {
-    // Immediately reflect localStorage (set synchronously by the modal's save handler)
-    // so the badge updates before the async backend call resolves.
-    setApiKeyStatus({
-      openrouter: !!(localStorage.getItem('aud-io-openrouter-key')),
-      huggingface: !!(localStorage.getItem('aud-io-hf-token')),
-    });
-    // Then confirm with the backend DB (slight delay to let the fire-and-forget write settle)
-    setTimeout(() => {
-      getAllApiKeys().then(keys => {
-        setApiKeyStatus({
-          openrouter: keys.some(k => k.key_type === 'openrouter' && !!k.value),
-          huggingface: keys.some(k => k.key_type === 'huggingface' && !!k.value),
-        });
-      }).catch(() => {
-        // Backend not ready — localStorage snapshot is already shown, keep it
-      });
-    }, 400);
+  // Badge state is derived directly from context — zero-latency, always accurate.
+  const apiKeyStatus = {
+    openrouter: !!openRouterApiKey,
+    huggingface: !!hfToken,
   };
-
-  useEffect(() => {
-    refreshApiKeyStatus();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Feedback form state
   const [feedbackName, setFeedbackName] = useState(user?.name || '');
@@ -55,9 +32,33 @@ const SettingsPanel: React.FC<{
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
   const [feedbackError, setFeedbackError] = useState('');
 
+  // API key popup modal state
+  const [keyModal, setKeyModal] = useState<'openrouter' | 'huggingface' | null>(null);
+  const [keyInput, setKeyInput] = useState('');
+  const [showKey, setShowKey] = useState(false);
+
+  const openKeyModal = (type: 'openrouter' | 'huggingface') => {
+    setKeyInput(type === 'openrouter' ? openRouterApiKey : hfToken);
+    setShowKey(false);
+    setKeyModal(type);
+  };
+
+  const saveKey = () => {
+    const trimmed = keyInput.trim();
+    if (keyModal === 'openrouter') setOpenRouterApiKey(trimmed);
+    else setHfToken(trimmed);
+    setKeyModal(null);
+  };
+
+  const removeKey = () => {
+    if (keyModal === 'openrouter') setOpenRouterApiKey('');
+    else setHfToken('');
+    setKeyModal(null);
+  };
+
   const handleFeedbackSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!feedbackMessage.trim()) {
       setFeedbackError('Please enter your feedback');
       return;
@@ -78,15 +79,13 @@ const SettingsPanel: React.FC<{
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          name: feedbackName,
           email: feedbackEmail,
-          message: feedbackMessage,
-          subject: `FEEDBACK from ${feedbackName || 'Anonymous'}`,
-          to_email: 'product@offlineintelligence.io',
+          message: `Name: ${feedbackName || 'Anonymous'}\nEmail: ${feedbackEmail}\n\nFeedback:\n${feedbackMessage}`,
         }),
       });
 
       if (response.ok) {
+        localStorage.setItem('aud-io-feedback-given', 'true');
         setFeedbackSubmitted(true);
         setTimeout(() => {
           setFeedbackSubmitted(false);
@@ -176,7 +175,7 @@ const SettingsPanel: React.FC<{
                 <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <Key size={14} style={{ flexShrink: 0 }} />
                   OpenRouter API Key
-                  {/* Live status badge */}
+                  {/* Live status badge — driven by context, zero latency */}
                   <span style={{
                     display: 'inline-flex', alignItems: 'center', gap: '4px',
                     fontSize: '11px', fontWeight: 600, padding: '2px 8px',
@@ -197,12 +196,7 @@ const SettingsPanel: React.FC<{
                     : 'Add your API key to enable online AI models via OpenRouter.'}
                 </p>
               </div>
-              <button
-                className="header-button"
-                onClick={() => {
-                  showOpenRouterApiKeyModal(onOpenRouterApiKeyChange, setApiKey, refreshApiKeyStatus);
-                }}
-              >
+              <button className="header-button" onClick={() => openKeyModal('openrouter')}>
                 {apiKeyStatus.openrouter ? 'Change' : 'Add Key'}
               </button>
             </div>
@@ -234,12 +228,7 @@ const SettingsPanel: React.FC<{
                     : 'Add your token to download gated or private HuggingFace models.'}
                 </p>
               </div>
-              <button
-                className="header-button"
-                onClick={() => {
-                  showHuggingFaceApiKeyModal(onHuggingFaceTokenChange, setApiKey, refreshApiKeyStatus);
-                }}
-              >
+              <button className="header-button" onClick={() => openKeyModal('huggingface')}>
                 {apiKeyStatus.huggingface ? 'Change' : 'Add Token'}
               </button>
             </div>
@@ -282,7 +271,7 @@ const SettingsPanel: React.FC<{
               <MessageSquare size={18} />
               Feedback
             </h2>
-            
+
             {feedbackSubmitted ? (
               <div style={{ textAlign: 'center', padding: '24px 0' }}>
                 <div
@@ -461,6 +450,122 @@ const SettingsPanel: React.FC<{
           </div>
         </div>
       </div>
+
+      {/* ── API Key popup modal ── */}
+      {keyModal && (
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setKeyModal(null); }}
+          style={{
+            position: 'fixed', inset: 0,
+            background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 9999,
+          }}
+        >
+          <div style={{
+            background: 'var(--bg-modal, var(--bg-secondary))',
+            border: '1px solid var(--border-primary)',
+            borderRadius: '16px', padding: '28px 28px 24px',
+            width: '420px', maxWidth: '92vw',
+            boxShadow: '0 24px 48px rgba(0,0,0,0.35)',
+            position: 'relative',
+          }}>
+            {/* Close */}
+            <button
+              onClick={() => setKeyModal(null)}
+              style={{
+                position: 'absolute', top: '14px', right: '14px',
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--text-muted)', fontSize: '20px', lineHeight: 1,
+                padding: '4px 8px', borderRadius: '6px',
+              }}
+              aria-label="Close"
+            >×</button>
+
+            {/* Title */}
+            <h3 style={{ margin: '0 0 6px', fontSize: '17px', fontWeight: 700, color: 'var(--text-primary)' }}>
+              {keyModal === 'openrouter' ? 'OpenRouter API Key' : 'HuggingFace Token'}
+            </h3>
+            <p style={{ margin: '0 0 20px', fontSize: '13px', color: 'var(--text-muted)' }}>
+              {keyModal === 'openrouter'
+                ? 'Enter your OpenRouter API key to enable online AI models.'
+                : 'Enter your HuggingFace token to access gated and private models.'}
+            </p>
+
+            {/* Input */}
+            <div style={{ position: 'relative' }}>
+              <input
+                type={showKey ? 'text' : 'password'}
+                value={keyInput}
+                onChange={(e) => setKeyInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') saveKey(); if (e.key === 'Escape') setKeyModal(null); }}
+                placeholder={keyModal === 'openrouter' ? 'sk-or-v1-...' : 'hf_...'}
+                autoFocus
+                style={{
+                  width: '100%', boxSizing: 'border-box',
+                  padding: '10px 40px 10px 12px',
+                  background: 'var(--bg-input, var(--bg-primary))',
+                  border: '1px solid var(--border-primary)',
+                  borderRadius: '8px', fontSize: '14px',
+                  color: 'var(--text-primary)', outline: 'none',
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowKey(v => !v)}
+                style={{
+                  position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)',
+                  background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)',
+                  display: 'flex', alignItems: 'center', padding: 0,
+                }}
+                aria-label={showKey ? 'Hide key' : 'Show key'}
+              >
+                {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: '8px', marginTop: '20px', justifyContent: 'flex-end' }}>
+              {(keyModal === 'openrouter' ? openRouterApiKey : hfToken) && (
+                <button
+                  onClick={removeKey}
+                  style={{
+                    padding: '9px 16px', borderRadius: '8px', border: '1px solid rgba(239,68,68,0.4)',
+                    background: 'rgba(239,68,68,0.08)', color: '#ef4444',
+                    fontSize: '13px', fontWeight: 600, cursor: 'pointer', marginRight: 'auto',
+                  }}
+                >
+                  Remove
+                </button>
+              )}
+              <button
+                onClick={() => setKeyModal(null)}
+                style={{
+                  padding: '9px 18px', borderRadius: '8px',
+                  border: '1px solid var(--border-primary)',
+                  background: 'transparent', color: 'var(--text-secondary)',
+                  fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveKey}
+                disabled={!keyInput.trim()}
+                style={{
+                  padding: '9px 20px', borderRadius: '8px', border: 'none',
+                  background: keyInput.trim() ? 'var(--accent-primary, #00d4aa)' : 'var(--bg-secondary)',
+                  color: keyInput.trim() ? '#fff' : 'var(--text-muted)',
+                  fontSize: '13px', fontWeight: 600,
+                  cursor: keyInput.trim() ? 'pointer' : 'not-allowed',
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -18,6 +18,21 @@ use crate::{
 };
 use crate::engine_management::EngineManager;
 
+/// Cached result of pre-extracting a file attachment before the user hits Send.
+/// Populated by `POST /attachments/preprocess`, consumed by `/generate/stream`.
+#[derive(Clone)]
+pub struct PreExtracted {
+    pub text: String,
+    pub extracted_at: std::time::Instant,
+}
+
+impl PreExtracted {
+    /// Returns true when the entry has exceeded its time-to-live.
+    pub fn is_stale(&self, ttl_secs: u64) -> bool {
+        self.extracted_at.elapsed().as_secs() >= ttl_secs
+    }
+}
+
 /// Core shared system state container
 pub struct SharedSystemState {
     /// Conversation data with hierarchical locking
@@ -61,6 +76,16 @@ pub struct SharedSystemState {
     
     /// HTTP server port - may differ from config if original port was in use
     pub http_port: Arc<RwLock<u16>>,
+
+    /// Pre-extracted attachment text cache.
+    /// Key: `"inline:{path}"` or `"local_storage:{id}"`.
+    /// Populated by `POST /attachments/preprocess` while the user types;
+    /// consumed (and evicted) by `/generate/stream` at Send time.
+    pub attachment_cache: Arc<DashMap<String, PreExtracted>>,
+
+    /// Limits concurrent binary-file extractions to num_cpus/2 (min 1, max 8)
+    /// so the LLM server is never CPU-starved on low-spec hardware.
+    pub extraction_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 /// Hierarchical conversation storage for reduced lock contention
@@ -160,6 +185,11 @@ impl SharedSystemState {
         // Create LLM worker with backend URL from config
         let llm_worker = Arc::new(LLMWorker::new_with_backend(backend_url));
 
+        // Semaphore for concurrent binary-file extractions.
+        // Use half the logical cores so the LLM server is never CPU-starved.
+        let max_concurrent = (num_cpus::get() / 2).max(1).min(8);
+        info!("Attachment extraction semaphore: {} concurrent slots (num_cpus={})", max_concurrent, num_cpus::get());
+
         Ok(Self {
             conversations,
             llm_runtime: Arc::new(RwLock::new(None)),
@@ -174,7 +204,9 @@ impl SharedSystemState {
             engine_manager: None,
             engine_available: Arc::new(AtomicBool::new(false)),
             initialization_complete: Arc::new(AtomicBool::new(false)),
-            http_port: Arc::new(RwLock::new(api_port)), // Default to configured port
+            http_port: Arc::new(RwLock::new(api_port)),
+            attachment_cache: Arc::new(DashMap::new()),
+            extraction_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
         })
     }
 
@@ -291,17 +323,27 @@ pub struct UnifiedAppState {
     pub context_orchestrator: Arc<tokio::sync::RwLock<Option<ContextOrchestrator>>>,
     pub llm_worker: Arc<LLMWorker>,
     pub auth_state: Option<Arc<crate::api::auth_api::AuthState>>,
+    /// Shared HTTP client — one TLS pool reused across all outbound requests
+    /// (OpenRouter, HuggingFace, etc.) instead of creating a new client per call.
+    pub http_client: reqwest::Client,
 }
 
 impl UnifiedAppState {
     pub fn new(shared_state: Arc<SharedSystemState>) -> Self {
         let context_orchestrator = shared_state.context_orchestrator.clone();
         let llm_worker = shared_state.llm_worker.clone();
+        // Build a single shared client with a generous timeout for LLM streaming.
+        // reqwest::Client is cheaply Clone (just bumps an Arc ref-count internally).
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             shared_state,
             context_orchestrator,
             llm_worker,
             auth_state: None,
+            http_client,
         }
     }
 }

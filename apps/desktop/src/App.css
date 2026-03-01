@@ -293,33 +293,6 @@
   border: 0.5px solid var(--chat-selected-border);
 }
 
-.sidebar-chat-item.deleting {
-  opacity: 0.6;
-  pointer-events: none;
-}
-
-.sidebar-chat-deleting {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  margin-right: 8px;
-}
-
-.sidebar-spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid var(--border-primary);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 [data-theme="dark"] .sidebar-chat-item.selected,
 :root .sidebar-chat-item.selected {
   --chat-selected-border: rgba(255, 255, 255, 0.5);
@@ -373,7 +346,39 @@
 .sidebar-footer-section {
   margin-top: auto;
   padding-top: 8px;
+}
 
+/* Google Sign-In button — shown at the bottom of the sidebar when not logged in */
+.sidebar-google-signin-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+  text-align: left;
+}
+
+.sidebar-google-signin-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+/* Danger variant for Sign Out dropdown item */
+.sidebar-dropdown-item--danger {
+  color: var(--error, #ef4444);
+}
+
+.sidebar-dropdown-item--danger:hover {
+  background-color: rgba(239, 68, 68, 0.08);
+  color: var(--error, #ef4444);
 }
 
 .sidebar-profile-row {
@@ -716,18 +721,16 @@ dark .capsule-btn-gray:hover {
   color: var(--text-primary);
 }
 
-/* Message Attachments (visual display in chat bubbles) */
+/* Message Attachments (visual display in chat bubbles — chips above the message text) */
 .message-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.2);
+  margin-bottom: 10px;
 }
 
 .message-bubble.user .message-attachments {
-  border-top-color: rgba(255, 255, 255, 0.3);
+  /* chips inherit white colour from parent .message-bubble.user */
 }
 
 .message-attachment-chip {
@@ -920,15 +923,13 @@ dark .capsule-btn-gray:hover {
   color: var(--text-muted);
 }
 
-/* Attachment Tray Above Input */
+/* Attachment Tray Above Input — transparent, chips float cleanly above the input pill */
 .attachment-tray-above-input {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 8px 12px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border-primary);
-  justify-content: flex-end;
+  padding: 6px 12px 2px;
+  justify-content: flex-start;
 }
 
 .attachment-chip {

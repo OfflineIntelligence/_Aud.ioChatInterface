@@ -239,14 +239,15 @@ const NotificationsContainer: React.FC = () => {
     <div
       style={{
         position: 'fixed',
-        bottom: '24px',
+        top: '16px',
         right: '24px',
         zIndex: 9999,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'flex-end',
+        gap: '8px',
         pointerEvents: 'none',
-        maxHeight: 'calc(100vh - 48px)',
+        maxHeight: 'calc(100vh - 32px)',
         overflowY: 'auto',
         overflowX: 'visible',
         scrollbarWidth: 'none',

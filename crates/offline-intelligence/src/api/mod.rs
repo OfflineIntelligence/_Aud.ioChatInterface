@@ -16,6 +16,7 @@ pub mod login_notification_api;
 pub mod api_keys_api;
 pub mod mode_api;
 pub mod auth_api;
+pub mod attachment_api;
 
 // Re-export API handlers
 pub use memory_api::{memory_optimize, memory_stats, memory_cleanup};

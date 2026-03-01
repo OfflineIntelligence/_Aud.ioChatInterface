@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 import { AuthProvider } from './contexts/AuthContext.tsx'
+import { ApiKeyProvider } from './contexts/ApiKeyContext.tsx'
 import { NotificationProvider } from './contexts/NotificationContext.tsx'
 import { ThemeProvider } from './contexts/ThemeContext.tsx'
 import { LoadingScreen } from './components/LoadingScreen.tsx'
@@ -23,11 +24,13 @@ try {
     <StrictMode>
       <LoadingScreen>
         <AuthProvider>
-          <ThemeProvider>
-            <NotificationProvider>
-              <App />
-            </NotificationProvider>
-          </ThemeProvider>
+          <ApiKeyProvider>
+            <ThemeProvider>
+              <NotificationProvider>
+                <App />
+              </NotificationProvider>
+            </ThemeProvider>
+          </ApiKeyProvider>
         </AuthProvider>
       </LoadingScreen>
     </StrictMode>,

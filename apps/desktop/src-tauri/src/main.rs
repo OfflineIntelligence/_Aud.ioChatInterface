@@ -216,44 +216,9 @@ fn main() {
             // Signal that backend is starting (config loaded successfully)
             let _ = started_tx.send(true);
 
-            // BLOCKING engine initialization - wait for engine to be ready
-            // This prevents race conditions and ensures llama-server is ready before UI loads
-            eprintln!("Checking for installed engine...");
-
-            match offline_intelligence::engine_management::EngineManager::new() {
-                Ok(engine_manager) => {
-                    eprintln!("Analyzing system hardware capabilities...");
-
-                    // BLOCKING initialization with 120 second timeout
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(120),
-                        engine_manager.initialize(&config)
-                    ).await {
-                        Ok(Ok(true)) => {
-                            eprintln!("✅ Engine initialized successfully");
-                        }
-                        Ok(Ok(false)) => {
-                            eprintln!("⚠️  No engine found - offline mode unavailable");
-                            eprintln!("   User can download engine from UI later");
-                        }
-                        Ok(Err(e)) => {
-                            eprintln!("❌ Engine initialization failed: {}", e);
-                            eprintln!("   Continuing in online-only mode");
-                        }
-                        Err(_) => {
-                            eprintln!("⏱️  Engine initialization timed out after 120 seconds");
-                            eprintln!("   This may happen on slow systems or first install");
-                            eprintln!("   Continuing in online-only mode");
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("❌ Engine manager initialization failed: {}", e);
-                    eprintln!("   Continuing in online-only mode");
-                }
-            }
-
-            // Start the server
+            // Start the server immediately — run_thread_server handles all heavy
+            // initialization (engine, model manager, runtime) in its own background tasks,
+            // so the port is bound and communicated back to the main thread quickly.
             let server_handle = tokio::spawn(run_thread_server(config, Some(port_tx.clone())));
 
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
