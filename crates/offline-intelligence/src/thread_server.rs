@@ -268,22 +268,27 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
                 extra_config: serde_json::json!({}),
             };
 
-            // Check whether an engine binary exists
+            // Check whether an engine binary exists (registry OR bundled config binary)
+            let llama_bin_exists = !cfg_bg.llama_bin.is_empty()
+                && std::path::Path::new(&cfg_bg.llama_bin).exists();
             let has_engine = if let Some(ref em) = shared_state_bg.engine_manager {
                 let reg = em.registry.read().await;
-                reg.get_default_engine_binary_path().is_some()
-            } else { false };
+                reg.get_default_engine_binary_path().is_some() || llama_bin_exists
+            } else {
+                llama_bin_exists
+            };
+
+            // Always store the RuntimeManager so that switch_model can work
+            // even when no engine is currently installed (user can download later).
+            if let Err(e) = shared_state_bg.set_runtime_manager(runtime_manager.clone()) {
+                error!("❌ Failed to set runtime manager: {}", e);
+            }
+            shared_state_bg.llm_worker.set_runtime_manager(runtime_manager.clone());
+            info!("🔗 LLM worker linked to runtime manager");
 
             if has_engine {
-                if let Err(e) = shared_state_bg.set_runtime_manager(runtime_manager.clone()) {
-                    error!("❌ Failed to set runtime manager: {}", e);
-                }
-                shared_state_bg.llm_worker.set_runtime_manager(runtime_manager.clone());
-                info!("🔗 LLM worker linked to runtime manager");
-
                 // Try to auto-load the last used model
                 let last_model_loaded = 'load: {
-                    if !cfg_bg.model_path.is_empty() { break 'load false; }
                     let Some(data_dir) = dirs::data_dir() else { break 'load false; };
                     let last_model_path = data_dir.join("Aud.io").join("last_model.txt");
                     let Ok(last_model_id_raw) = std::fs::read_to_string(&last_model_path) else {
@@ -325,6 +330,9 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
                     let default_engine = if let Some(ref em) = shared_state_bg.engine_manager {
                         let reg = em.registry.read().await;
                         reg.get_default_engine_binary_path()
+                            .or_else(|| if !cfg_bg.llama_bin.is_empty() { Some(std::path::PathBuf::from(&cfg_bg.llama_bin)) } else { None })
+                    } else if !cfg_bg.llama_bin.is_empty() {
+                        Some(std::path::PathBuf::from(&cfg_bg.llama_bin))
                     } else { None };
 
                     let mut updated_config = runtime_config.clone();
@@ -347,6 +355,9 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
                     let default_engine = if let Some(ref em) = shared_state_bg.engine_manager {
                         let reg = em.registry.read().await;
                         reg.get_default_engine_binary_path()
+                            .or_else(|| if !cfg_bg.llama_bin.is_empty() { Some(std::path::PathBuf::from(&cfg_bg.llama_bin)) } else { None })
+                    } else if !cfg_bg.llama_bin.is_empty() {
+                        Some(std::path::PathBuf::from(&cfg_bg.llama_bin))
                     } else { None };
                     let mut updated_config = runtime_config;
                     updated_config.runtime_binary = default_engine;
@@ -576,6 +587,7 @@ fn build_compatible_router(mut state: UnifiedAppState) -> axum::Router {
         .route("/api-keys/all", get(crate::api::api_keys_api::get_all_api_keys))
         .route("/api-keys", delete(crate::api::api_keys_api::delete_api_key))
         .route("/api-keys/mark-used", post(crate::api::api_keys_api::mark_key_used))
+        .route("/api-keys/verify", post(crate::api::api_keys_api::verify_api_key))
         // Mode management endpoints (online/offline)
         .route("/mode/switch", post(crate::api::mode_api::switch_mode))
         .route("/mode/status", get(crate::api::mode_api::get_mode_status))

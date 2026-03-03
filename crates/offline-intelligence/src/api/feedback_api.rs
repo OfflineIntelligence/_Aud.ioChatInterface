@@ -129,16 +129,21 @@ async fn send_feedback_email(payload: &FeedbackRequest) -> Result<u64, Box<dyn s
         transport::smtp::authentication::Credentials,
     };
 
-    let smtp_user = std::env::var("SMTP_USER").unwrap_or_default();
-    let smtp_pass = std::env::var("SMTP_PASS").unwrap_or_default();
+    // Runtime env vars take priority; fall back to values baked in at compile time
+    // by build.rs so that installed/distributed builds (no .env file) still work.
+    let smtp_user = std::env::var("SMTP_USER")
+        .unwrap_or_else(|_| option_env!("SMTP_USER").unwrap_or("").to_string());
+    let smtp_pass = std::env::var("SMTP_PASS")
+        .unwrap_or_else(|_| option_env!("SMTP_PASS").unwrap_or("").to_string());
 
     if smtp_user.is_empty() || smtp_pass.is_empty() {
         return Err("SMTP credentials not configured".into());
     }
 
-    let smtp_host = std::env::var("SMTP_HOST").unwrap_or_else(|_| "smtp.hostinger.com".to_string());
+    let smtp_host = std::env::var("SMTP_HOST")
+        .unwrap_or_else(|_| option_env!("SMTP_HOST").unwrap_or("smtp.hostinger.com").to_string());
     let smtp_port: u16 = std::env::var("SMTP_PORT")
-        .unwrap_or_else(|_| "587".to_string())
+        .unwrap_or_else(|_| option_env!("SMTP_PORT").unwrap_or("587").to_string())
         .parse()
         .unwrap_or(587);
 

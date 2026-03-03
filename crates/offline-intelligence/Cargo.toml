@@ -81,9 +81,10 @@ argon2 = "0.5"
 hex = "0.4"
 # Document extraction
 calamine = "0.26"
+# PNG encoding for macOS PDF page rendering (passed to Vision as image data)
+png = "0.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-pdf = "0.8"
 objc2 = "0.5"
 objc2-vision = "0.3"
 objc2-foundation = "0.2"

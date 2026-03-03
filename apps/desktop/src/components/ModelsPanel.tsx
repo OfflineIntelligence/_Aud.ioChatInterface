@@ -1143,7 +1143,17 @@ const ModelsPanel: React.FC<{
         // multiple times after a restart (catalog + disk scan overlap).
         const seen = new Set<string>();
         const unique = data.filter(m => { if (seen.has(m.id)) return false; seen.add(m.id); return true; });
-        setModels(unique);
+        // Also deduplicate installed models by name — backend can return the same
+        // physical file under two different IDs (catalog entry + disk-scan entry).
+        const seenInstalledNames = new Set<string>();
+        const finalUnique = unique.filter(m => {
+          if (m.status !== 'Installed') return true;
+          const key = m.name.toLowerCase();
+          if (seenInstalledNames.has(key)) return false;
+          seenInstalledNames.add(key);
+          return true;
+        });
+        setModels(finalUnique);
         // Do nothing if backend returns empty list, keep the models as received
       } else {
         setFetchError(`Backend returned HTTP ${response.status}. Make sure the backend is running.`);
@@ -2407,6 +2417,7 @@ const ModelsPanel: React.FC<{
                         activeModelInfo={activeModelInfo}
                         onSwitchModel={handleSwitchModel}
                         onOpenRouterApiKeyChange={onOpenRouterApiKeyChange}
+                        onRefreshModels={fetchModels}
                       />
                     );
                   })}
@@ -2611,7 +2622,8 @@ const ModelCard: React.FC<{
   onSwitchModel?: (modelId: string, modelName: string) => void;
   onOpenRouterApiKeyChange?: (key: string) => void;
   setApiKey?: (provider: 'openrouter' | 'huggingface', key: string) => void;
-}> = ({ model, download, isInstalled, isAvailable, onInstall, onRemove, onPauseDownload, onResumeDownload, onCancelDownload, formatBytes, selectedModel, onSelectModel, onToggleOnlineMode, hasApiKey, activeModelInfo, onSwitchModel, onOpenRouterApiKeyChange, setApiKey }) => {
+  onRefreshModels?: () => void;
+}> = ({ model, download, isInstalled, isAvailable, onInstall, onRemove, onPauseDownload, onResumeDownload, onCancelDownload, formatBytes, selectedModel, onSelectModel, onToggleOnlineMode, hasApiKey, activeModelInfo, onSwitchModel, onOpenRouterApiKeyChange, setApiKey, onRefreshModels }) => {
   // Read from context so this card is always in sync with the shared key state.
   const {
     hfToken: ctxHfToken,
@@ -2623,11 +2635,13 @@ const ModelCard: React.FC<{
   const [orModalStep, setOrModalStep] = useState<'none' | 'choice' | 'input'>('none');
   const [orKeyInput, setOrKeyInput] = useState('');
   const [orKeyError, setOrKeyError] = useState(false);
+  const [orKeyInputError, setOrKeyInputError] = useState('');
   const orKeyRef = useRef<HTMLInputElement>(null);
 
   const [hfModalStep, setHfModalStep] = useState<'none' | 'choice' | 'input'>('none');
   const [hfTokenInput, setHfTokenInput] = useState('');
   const [hfTokenError, setHfTokenError] = useState(false);
+  const [hfTokenInputError, setHfTokenInputError] = useState('');
   const hfTokenRef = useRef<HTMLInputElement>(null);
 
   // Focus input when switching to the input step
@@ -2641,17 +2655,52 @@ const ModelCard: React.FC<{
   const closeOrModal = () => { setOrModalStep('none'); setOrKeyInput(''); setOrKeyError(false); };
   const closeHfModal = () => { setHfModalStep('none'); setHfTokenInput(''); setHfTokenError(false); };
 
-  const saveOrKey = () => {
+  const verifyApiKey = async (keyType: 'openrouter' | 'huggingface', apiKey: string): Promise<{ valid: boolean; message: string }> => {
+    try {
+      const response = await fetch(`${getApiBaseSync()}/api-keys/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key_type: keyType, api_key: apiKey }),
+      });
+      const data = await response.json();
+      return { valid: data.valid, message: data.message };
+    } catch (error) {
+      return { valid: false, message: 'Failed to verify API key. Please check your internet connection.' };
+    }
+  };
+
+  const saveOrKey = async () => {
     const key = orKeyInput.trim();
     if (!key) { setOrKeyError(true); setTimeout(() => setOrKeyError(false), 1000); return; }
+    
+    // Verify the key first
+    const verification = await verifyApiKey('openrouter', key);
+    if (!verification.valid) {
+      setOrKeyError(true);
+      setOrKeyInputError(verification.message);
+      setTimeout(() => { setOrKeyError(false); setOrKeyInputError(''); }, 3000);
+      return;
+    }
+    
     ctxSetOpenRouterApiKey(key);
     onOpenRouterApiKeyChange?.(key);
     closeOrModal();
+    onRefreshModels?.();
   };
 
-  const saveHfToken = () => {
+  const saveHfToken = async () => {
     const token = hfTokenInput.trim();
     if (!token) { setHfTokenError(true); setTimeout(() => setHfTokenError(false), 1000); return; }
+    
+    // Verify the token first
+    const verification = await verifyApiKey('huggingface', token);
+    if (!verification.valid) {
+      setHfTokenError(true);
+      setHfTokenInputError(verification.message);
+      setTimeout(() => { setHfTokenError(false); setHfTokenInputError(''); }, 3000);
+      return;
+    }
+    
     ctxSetHfToken(token);
     closeHfModal();
     onInstall(model);
@@ -3020,8 +3069,11 @@ const ModelCard: React.FC<{
                   value={orKeyInput}
                   onChange={(e) => setOrKeyInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && saveOrKey()}
-                  style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${orKeyError ? '#ef4444' : '#d1d5db'}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 12, outline: 'none' }}
+                  style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${orKeyError ? '#ef4444' : '#d1d5db'}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 6, outline: 'none' }}
                 />
+                {orKeyInputError && (
+                  <p style={{ color: '#ef4444', fontSize: '12px', marginBottom: 12, textAlign: 'center' }}>{orKeyInputError}</p>
+                )}
                 <button
                   onClick={saveOrKey}
                   style={{ width: '100%', padding: '11px 16px', background: '#000', color: 'white', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}
@@ -3080,8 +3132,11 @@ const ModelCard: React.FC<{
                   value={hfTokenInput}
                   onChange={(e) => setHfTokenInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && saveHfToken()}
-                  style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${hfTokenError ? '#ef4444' : '#d1d5db'}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 12, outline: 'none' }}
+                  style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${hfTokenError ? '#ef4444' : '#d1d5db'}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 6, outline: 'none' }}
                 />
+                {hfTokenInputError && (
+                  <p style={{ color: '#ef4444', fontSize: '12px', marginBottom: 12, textAlign: 'center' }}>{hfTokenInputError}</p>
+                )}
                 <button
                   onClick={saveHfToken}
                   style={{ width: '100%', padding: '11px 16px', background: '#000', color: 'white', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}

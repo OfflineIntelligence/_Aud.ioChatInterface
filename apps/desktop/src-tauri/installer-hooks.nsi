@@ -77,6 +77,14 @@ Var AppDataPath
     RMDir "$TEMP\Aud.io-Install"
 !macroend
 
+; Hook: Called during uninstallation (runs before Tauri's default uninstall logic)
+; Always clears last_model.txt so a fresh install starts with "browse models"
+; rather than a stale reference to a model that may no longer be installed.
+!macro customUninstall
+  DetailPrint "Clearing model auto-load state..."
+  Delete "$APPDATA\Aud.io\last_model.txt"
+!macroend
+
 ; Function to detect hardware and set engine URL
 Function DetectHardwareAndSetEngine
   ; Default to CPU engine

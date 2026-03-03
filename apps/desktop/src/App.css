@@ -444,6 +444,56 @@
   background-color: var(--bg-chat);
 }
 
+/* chat-body wraps messages + input bar so they can be centred together in welcome mode */
+.chat-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.chat-body .chat-messages {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Welcome mode — vertically centre the welcome content + input as a unit */
+.chat-body.welcome-mode {
+  justify-content: center;
+}
+
+.chat-body.welcome-mode .chat-messages {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+/* Shrink the min-height so it doesn't push the input off-centre */
+.chat-body.welcome-mode .chat-welcome {
+  min-height: auto;
+  padding: 24px 0 12px;
+}
+
+/* In welcome mode: make the input bar a flex-column so we can reorder its children.
+   Form (order 1) appears first, banner (order 2) appears below it. */
+.chat-body.welcome-mode .chat-input-bar {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-body.welcome-mode .model-prompt-banner-wrapper {
+  order: 2;
+}
+
+.chat-body.welcome-mode .attachment-tray-above-input {
+  order: 0;
+}
+
+.chat-body.welcome-mode .chat-input-form {
+  order: 1;
+  width: 100%; /* flex-item shrinks to content width without this */
+}
+
 .chat-header {
   padding: 20px 16px 10px 16px;
   background-color: var(--bg-primary);
@@ -707,8 +757,15 @@ dark .capsule-btn-gray:hover {
 .message-wrapper.user { justify-content: flex-end; }
 .message-wrapper.assistant { justify-content: flex-start; }
 
-.message-bubble.user {
+.message-user-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
   max-width: 70%;
+}
+
+.message-bubble.user {
   padding: 14px 18px;
   border-radius: 18px;
   background-color: var(--bg-bubble-user);
@@ -721,46 +778,39 @@ dark .capsule-btn-gray:hover {
   color: var(--text-primary);
 }
 
-/* Message Attachments (visual display in chat bubbles — chips above the message text) */
-.message-attachments {
+/* File attachment cards — displayed above the user message bubble (outside it) */
+.message-file-cards {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 10px;
+  justify-content: flex-end;
 }
 
-.message-bubble.user .message-attachments {
-  /* chips inherit white colour from parent .message-bubble.user */
-}
-
-.message-attachment-chip {
-  display: inline-flex;
+.message-file-card {
+  display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  background: rgba(255, 255, 255, 0.15);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 6px;
-  font-size: 12px;
-  color: inherit;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  max-width: 220px;
+  cursor: default;
 }
 
-.message-bubble.user .message-attachment-chip {
-  background: rgba(255, 255, 255, 0.2);
-  border-color: rgba(255, 255, 255, 0.4);
-  color: white;
-}
-
-.message-attachment-icon {
-  font-size: 14px;
+.message-file-card-icon {
+  font-size: 20px;
+  flex-shrink: 0;
   line-height: 1;
 }
 
-.message-attachment-name {
-  max-width: 120px;
+.message-file-card-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text-primary);
+  font-weight: 500;
+  font-size: 12px;
 }
 
 .loading-bubble { display: flex; gap: 6px; padding: 16px 20px; }
@@ -785,12 +835,12 @@ dark .capsule-btn-gray:hover {
    ═══════════════════════════════════════════════════ */
 
 .chat-input-bar {
-  padding: 12px 16px 16px;
+  padding: 0 16px 8px;
   background-color: var(--bg-chat);
 }
 
 .chat-input-form {
-  max-width: 768px;
+  max-width: 680px;
   margin: 0 auto;
 }
 
@@ -801,7 +851,7 @@ dark .capsule-btn-gray:hover {
   background-color: var(--bg-input);
   border: 1px solid var(--border-primary);
   border-radius: 999px;
-  padding: 8px 12px;
+  padding: 10px 20px;
   transition: box-shadow 0.2s, border-color 0.2s;
   min-width: 0;
   overflow: visible;
@@ -855,7 +905,9 @@ dark .capsule-btn-gray:hover {
   background: transparent;
   border: none;
   outline: none;
-  font-size: 15px;
+  font-size: 16px;
+  line-height: 1.5;
+  padding: 2px 0;
   color: var(--text-primary);
   min-width: 0;
 }
@@ -923,13 +975,18 @@ dark .capsule-btn-gray:hover {
   color: var(--text-muted);
 }
 
-/* Attachment Tray Above Input — transparent, chips float cleanly above the input pill */
+/* Attachment Tray Above Input — confined to same column as the input pill */
 .attachment-tray-above-input {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 6px 12px 2px;
+  padding: 6px 0 10px;
   justify-content: flex-start;
+  max-width: 1229px;
+  margin-left: auto;
+  margin-right: auto;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .attachment-chip {
@@ -989,7 +1046,7 @@ dark .capsule-btn-gray:hover {
   flex-wrap: wrap;
   gap: 6px;
   padding: 8px 12px 4px;
-  max-width: 768px;
+  max-width: 1229px;
   margin: 0 auto;
   animation: traySlideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }

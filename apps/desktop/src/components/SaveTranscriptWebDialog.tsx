@@ -45,8 +45,9 @@ export function SaveTranscriptWebDialog({ open, defaultFileName, content, onClos
         break;
       case 'docx': {
         // Create a proper DOCX using the docx library
+        // Use Packer.toBlob() — Packer.toBuffer() requires Node.js Buffer (unavailable in browser/Tauri webview)
         const { Document: DocxDocument, Paragraph: DocxParagraph, Packer } = await import('docx');
-        
+
         const doc = new DocxDocument({
           sections: [{
             properties: {},
@@ -55,9 +56,8 @@ export function SaveTranscriptWebDialog({ open, defaultFileName, content, onClos
             ],
           }],
         });
-        
-        const buffer = await Packer.toBuffer(doc);
-        blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+
+        blob = await Packer.toBlob(doc);
         break;
       }
       case 'pdf': {
@@ -135,7 +135,9 @@ export function SaveTranscriptWebDialog({ open, defaultFileName, content, onClos
                 ],
               }],
             });
-            fileData = await Packer.toBuffer(doc);
+            // toBlob() works in browser/Tauri; convert to ArrayBuffer for the file writer
+            const docBlob = await Packer.toBlob(doc);
+            fileData = await docBlob.arrayBuffer();
           } else { // pdf
             const { jsPDF } = await import('jspdf');
             const pdf = new jsPDF();

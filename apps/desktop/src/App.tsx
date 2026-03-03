@@ -50,7 +50,9 @@ function MainApp() {
   );
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showFeedbackPopup, setShowFeedbackPopup] = useState(false);
-  const [isOnlineMode, setIsOnlineMode] = useState(false);
+  const [isOnlineMode, setIsOnlineMode] = useState(() =>
+    localStorage.getItem('aud-io-online-mode') === 'true'
+  );
 
   const [selectedModel, setSelectedModel] = useState<{
     id: string;

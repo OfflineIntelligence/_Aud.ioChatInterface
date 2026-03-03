@@ -59,7 +59,12 @@ export function LoadingScreen({ children }: LoadingScreenProps) {
                 const data = JSON.parse(text);
                 console.log(`[LoadingScreen] Health data:`, data);
                 // Health check returns: {status: "ready"|"initializing"|"degraded", runtime_ready: boolean}
-                if (data.status === 'ready' || data.status === 'degraded' || data.status === 'initializing') {
+                // "initializing" means Phase 3 (model auto-load) is still running — keep waiting.
+                // Only proceed once the backend has finished initializing:
+                //   "ready"   → model loaded and running, chat is available immediately.
+                //   "degraded" → Phase 3 complete but no model loaded (user is in online mode,
+                //                or has no downloaded model, or auto-load failed).
+                if (data.status === 'ready' || data.status === 'degraded') {
                   accepted = true;
                 }
               } catch {

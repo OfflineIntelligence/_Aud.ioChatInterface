@@ -27,6 +27,7 @@ use crate::{
     },
     model_runtime::RuntimeManager,
     shared_state::UnifiedAppState,
+    memory_db::ApiKeyType,
 };
 
 /// Request to install/download a model
@@ -139,7 +140,16 @@ async fn get_cloned_models(model_manager: &ModelManager) -> Vec<ModelInfo> {
     registry.list_models().iter().map(|m| (*m).clone()).collect()
 }
 
+/// Helper function to check if a verified API key exists in the database
+async fn has_verified_key(state: &UnifiedAppState, key_type: ApiKeyType) -> bool {
+    match state.shared_state.database_pool.api_keys.get_key_plaintext(&key_type) {
+        Ok(Some(_)) => true,
+        _ => false,
+    }
+}
+
 /// Get list of all models (installed and available)
+/// Filters out OpenRouter and HuggingFace models if no verified key exists
 pub async fn list_models(
     State(state): State<UnifiedAppState>,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -148,7 +158,26 @@ pub async fn list_models(
 
     let models = get_cloned_models(model_manager).await;
 
-    Ok(Json(models))
+    let has_openrouter_key = has_verified_key(&state, ApiKeyType::OpenRouter).await;
+    let has_huggingface_key = has_verified_key(&state, ApiKeyType::HuggingFace).await;
+
+    let filtered_models: Vec<ModelInfo> = models
+        .into_iter()
+        .filter(|m| {
+            let source = m.download_source.as_deref().unwrap_or("");
+            match source {
+                "openrouter" => {
+                    m.status == ModelStatus::Installed || has_openrouter_key
+                }
+                "huggingface" => {
+                    m.status == ModelStatus::Installed || has_huggingface_key
+                }
+                _ => true,
+            }
+        })
+        .collect();
+
+    Ok(Json(filtered_models))
 }
 
 /// Get models filtered by mode (online/offline)
@@ -165,8 +194,17 @@ pub async fn list_models_by_mode(
 
     let all_models = get_cloned_models(model_manager).await;
 
+    // Check for verified keys
+    let has_openrouter_key = has_verified_key(&state, ApiKeyType::OpenRouter).await;
+    let has_huggingface_key = has_verified_key(&state, ApiKeyType::HuggingFace).await;
+
     match mode {
         "online" => {
+            // Check if OpenRouter key is available
+            if !has_openrouter_key {
+                return Ok(Json(Vec::<ModelInfo>::new()));
+            }
+
             // Big tech providers to prioritize for OpenRouter free models
             let big_tech_providers = vec![
                 "openai",      // OpenAI
@@ -257,6 +295,11 @@ pub async fn list_models_by_mode(
             Ok(Json(sorted_models))
         }
         "offline" => {
+            // Check if HuggingFace key is available
+            if !has_huggingface_key {
+                return Ok(Json(Vec::<ModelInfo>::new()));
+            }
+
             // Big tech authors for HuggingFace
             let big_tech_authors = vec![
                 "google",
@@ -1030,22 +1073,26 @@ pub async fn switch_model(
         if let Some(bin_path) = metadata.runtime_binaries.get(platform_name) {
             Some(bin_path.clone())
         } else {
-            // Fallback to installed engine from engine registry
+            // Fallback to installed engine from engine registry, then to config llama_bin
             if let Some(ref engine_manager) = state.shared_state.engine_manager {
                 let registry = engine_manager.registry.read().await;
                 registry.get_default_engine_binary_path()
+                    .or_else(|| if !state.shared_state.config.llama_bin.is_empty() {
+                        Some(std::path::PathBuf::from(&state.shared_state.config.llama_bin))
+                    } else { None })
             } else {
-                // Last resort: use config
                 Some(std::path::PathBuf::from(&state.shared_state.config.llama_bin))
             }
         }
     } else {
-        // No metadata available, use installed engine from registry
+        // No metadata available, use installed engine from registry, then config llama_bin
         if let Some(ref engine_manager) = state.shared_state.engine_manager {
             let registry = engine_manager.registry.read().await;
             registry.get_default_engine_binary_path()
+                .or_else(|| if !state.shared_state.config.llama_bin.is_empty() {
+                    Some(std::path::PathBuf::from(&state.shared_state.config.llama_bin))
+                } else { None })
         } else {
-            // Last resort: use config
             Some(std::path::PathBuf::from(&state.shared_state.config.llama_bin))
         }
     };
@@ -1071,7 +1118,25 @@ pub async fn switch_model(
     info!("   Context Size: {}", runtime_config.context_size);
     info!("   GPU Layers: {}", runtime_config.gpu_layers);
 
-    // Use the runtime manager's hot_swap method to switch models
+    // Skip re-initialization if this exact model is already loaded and healthy.
+    // This avoids a shutdown→restart race where the model becomes briefly unavailable.
+    if let Some(current_config) = runtime_manager.get_current_config().await {
+        if current_config.model_path == runtime_config.model_path
+            && runtime_manager.is_ready().await
+        {
+            info!("✅ Model {} is already loaded and ready — skipping re-initialization", model_info.name);
+            if let Some(data_dir) = dirs::data_dir() {
+                let last_model_path = data_dir.join("Aud.io").join("last_model.txt");
+                let _ = std::fs::write(last_model_path, &payload.model_id);
+            }
+            return Ok(Json(SwitchModelResponse {
+                message: format!("Model {} is already loaded and ready for inference", model_info.name),
+                model_id: payload.model_id.clone(),
+                model_path: model_path_str,
+            }));
+        }
+    }
+
     // Use initialize_auto to automatically detect the model format
     match runtime_manager.initialize_auto(runtime_config).await {
         Ok(base_url) => {

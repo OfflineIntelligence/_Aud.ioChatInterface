@@ -231,3 +231,139 @@ pub async fn mark_key_used(
         }
     }
 }
+
+/// Request body for verifying an API key.
+#[derive(Debug, Deserialize)]
+pub struct VerifyApiKeyRequest {
+    pub key_type: String,
+    pub api_key: String,
+}
+
+/// Response for API key verification.
+#[derive(Debug, Serialize)]
+pub struct VerifyApiKeyResponse {
+    pub valid: bool,
+    pub message: String,
+}
+
+/// `POST /api-keys/verify` — verify an API key by calling the provider's API.
+///
+/// - For OpenRouter: Calls GET https://openrouter.ai/api/v1/key
+/// - For HuggingFace: Calls GET https://huggingface.co/api/whoami
+pub async fn verify_api_key(
+    State(state): State<UnifiedAppState>,
+    Json(payload): Json<VerifyApiKeyRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let key_type = ApiKeyType::from_str(&payload.key_type).ok_or(StatusCode::BAD_REQUEST)?;
+
+    if payload.api_key.trim().is_empty() {
+        return Ok(Json(VerifyApiKeyResponse {
+            valid: false,
+            message: "API key cannot be empty".to_string(),
+        }));
+    }
+
+    let client = reqwest::Client::new();
+    let http_client = state.http_client.clone();
+
+    match key_type {
+        ApiKeyType::OpenRouter => {
+            let url = "https://openrouter.ai/api/v1/key";
+            match http_client
+                .get(url)
+                .header("Authorization", format!("Bearer {}", payload.api_key))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        info!("OpenRouter API key verified successfully, saving to database");
+                        
+                        // Save the verified key to the database
+                        if let Err(e) = state.shared_state.database_pool.api_keys.save_key(key_type, &payload.api_key) {
+                            error!("Failed to save verified OpenRouter API key: {}", e);
+                            return Ok(Json(VerifyApiKeyResponse {
+                                valid: false,
+                                message: "Key verified but failed to save. Please try again.".to_string(),
+                            }));
+                        }
+                        
+                        Ok(Json(VerifyApiKeyResponse {
+                            valid: true,
+                            message: "OpenRouter API key is valid".to_string(),
+                        }))
+                    } else if resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN {
+                        info!("OpenRouter API key verification failed: invalid credentials");
+                        Ok(Json(VerifyApiKeyResponse {
+                            valid: false,
+                            message: "Invalid OpenRouter API key. Please check and try again.".to_string(),
+                        }))
+                    } else {
+                        let status = resp.status();
+                        error!("OpenRouter API key verification returned unexpected status: {}", status);
+                        Ok(Json(VerifyApiKeyResponse {
+                            valid: false,
+                            message: format!("OpenRouter API error: {}", status),
+                        }))
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to verify OpenRouter API key: {}", e);
+                    Ok(Json(VerifyApiKeyResponse {
+                        valid: false,
+                        message: "Failed to connect to OpenRouter API. Please check your internet connection.".to_string(),
+                    }))
+                }
+            }
+        }
+        ApiKeyType::HuggingFace => {
+            let url = "https://huggingface.co/api/whoami";
+            match http_client
+                .get(url)
+                .header("Authorization", format!("Bearer {}", payload.api_key))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        info!("HuggingFace token verified successfully, saving to database");
+                        
+                        // Save the verified token to the database
+                        if let Err(e) = state.shared_state.database_pool.api_keys.save_key(key_type, &payload.api_key) {
+                            error!("Failed to save verified HuggingFace token: {}", e);
+                            return Ok(Json(VerifyApiKeyResponse {
+                                valid: false,
+                                message: "Token verified but failed to save. Please try again.".to_string(),
+                            }));
+                        }
+                        
+                        Ok(Json(VerifyApiKeyResponse {
+                            valid: true,
+                            message: "HuggingFace token is valid".to_string(),
+                        }))
+                    } else if resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN {
+                        info!("HuggingFace token verification failed: invalid credentials");
+                        Ok(Json(VerifyApiKeyResponse {
+                            valid: false,
+                            message: "Invalid HuggingFace token. Please check and try again.".to_string(),
+                        }))
+                    } else {
+                        let status = resp.status();
+                        error!("HuggingFace API key verification returned unexpected status: {}", status);
+                        Ok(Json(VerifyApiKeyResponse {
+                            valid: false,
+                            message: format!("HuggingFace API error: {}", status),
+                        }))
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to verify HuggingFace token: {}", e);
+                    Ok(Json(VerifyApiKeyResponse {
+                        valid: false,
+                        message: "Failed to connect to HuggingFace API. Please check your internet connection.".to_string(),
+                    }))
+                }
+            }
+        }
+    }
+}

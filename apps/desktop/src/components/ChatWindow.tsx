@@ -1,7 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import type { Message, ChatAttachment } from '../api/chat';
 import { streamChat, updateConversationTitle } from '../api/chat';
 import { open as tauriOpenDialog } from '@tauri-apps/plugin-dialog';
+import { open as openInBrowser } from '@tauri-apps/plugin-shell';
 import { getApiBaseSync } from '../api/backendUrl';
 import { useChatTitle } from '../hooks/useChatTitle';
 import { useAuth } from '../contexts/AuthContext';
@@ -10,7 +12,6 @@ import { SaveTranscriptWebDialog } from './SaveTranscriptWebDialog';
 import MessageContent from './MessageContent';
 import { ModelPromptBanner } from './ModelPromptBanner';
 import { ErrorNavigationBox } from './ErrorNavigationBox';
-import { showOpenRouterApiKeyModal } from './ModelsPanel';
 
 export interface Chat {
     id: string;
@@ -94,6 +95,55 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     const dropdownRef = useRef<HTMLDivElement>(null);
     const modelDropdownRef = useRef<HTMLDivElement>(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+    // ── OpenRouter API-key portal modal (replaces DOM-injected showOpenRouterApiKeyModal) ──
+    const [orModalStep, setOrModalStep] = useState<'none' | 'choice' | 'input'>('none');
+    const [orKeyInput, setOrKeyInput] = useState('');
+    const [orKeyError, setOrKeyError] = useState(false);
+    const [orKeyInputError, setOrKeyInputError] = useState('');
+    const orKeyRef = useRef<HTMLInputElement>(null);
+    // Callbacks stored in refs so they are always up-to-date when the modal saves
+    const orOnKeySavedRef = useRef<((key: string) => void) | null>(null);
+    const orOnCompleteRef = useRef<(() => void) | null>(null);
+
+    useEffect(() => {
+        if (orModalStep === 'input') setTimeout(() => orKeyRef.current?.focus(), 50);
+    }, [orModalStep]);
+
+    const closeOrModal = () => { setOrModalStep('none'); setOrKeyInput(''); setOrKeyError(false); setOrKeyInputError(''); };
+
+    const verifyApiKey = async (keyType: 'openrouter' | 'huggingface', apiKey: string): Promise<{ valid: boolean; message: string }> => {
+        try {
+            const response = await fetch(`${getApiBaseSync()}/api-keys/verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key_type: keyType, api_key: apiKey }),
+            });
+            const data = await response.json();
+            return { valid: data.valid, message: data.message };
+        } catch (error) {
+            return { valid: false, message: 'Failed to verify API key. Please check your internet connection.' };
+        }
+    };
+
+    const saveOrKey = async () => {
+        const key = orKeyInput.trim();
+        if (!key) { setOrKeyError(true); setTimeout(() => setOrKeyError(false), 1000); return; }
+        
+        // Verify the key first
+        const verification = await verifyApiKey('openrouter', key);
+        if (!verification.valid) {
+            setOrKeyError(true);
+            setOrKeyInputError(verification.message);
+            setTimeout(() => { setOrKeyError(false); setOrKeyInputError(''); }, 3000);
+            return;
+        }
+        
+        setApiKey?.('openrouter', key);
+        orOnKeySavedRef.current?.(key);
+        closeOrModal();
+        orOnCompleteRef.current?.();
+    };
     const [isDeleting, setIsDeleting] = useState(false);
     const [attachedFiles, setAttachedFiles] = useState<ChatAttachment[]>([]);
     const [localFileAttachments, setLocalFileAttachments] = useState<ChatAttachment[]>([]);
@@ -248,18 +298,36 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     name: model.name
                 }));
 
+                // Normalize a model name by stripping quantization/variant suffixes so that
+                // "google_gemma-3-4b-it-Q4_K_M" and "google_gemma-3-4b-it" compare equal.
+                const normalizeModelName = (name: string) =>
+                    name
+                        .replace(/[-_\.](Q[0-9]+[_-][KM]+[_-]?[MS]?[0-9]*|q[0-9]+_[0-9]+|[0-9]+bit|gguf)[\w.-]*/gi, '')
+                        .replace(/[-_\s]+$/g, '')
+                        .toLowerCase();
+
                 // Check active model from parallel fetch (parse once, reuse below)
                 let activeModelData: { status?: string; model_name?: string } | null = null;
                 if (activeResponse?.ok) {
                     activeModelData = await activeResponse.json().catch(() => null);
                     if (activeModelData?.status === 'loaded' && activeModelData?.model_name) {
                         const activeId = `active:${activeModelData.model_name}`;
-                        // Add active model to list if not already present
-                        if (!localModelsList.some((m: SimpleModel) => m.name === activeModelData!.model_name)) {
+                        // Add active model only if not already represented (compare normalised names
+                        // so "gemma-3-4b-it-Q4_K_M" matches installed "gemma-3-4b-it")
+                        const activeNorm = normalizeModelName(activeModelData.model_name);
+                        if (!localModelsList.some((m: SimpleModel) => normalizeModelName(m.name) === activeNorm)) {
                             localModelsList = [{ id: activeId, name: `${activeModelData.model_name} (running)` }, ...localModelsList];
                         }
                     }
                 }
+
+                // Deduplicate by normalised name — backend can return same model under two IDs
+                // Also catches active "(running)" variant vs the catalog entry
+                const seenModelNames = new Set<string>();
+                localModelsList = localModelsList.filter(m => {
+                    const key = normalizeModelName(m.name);
+                    return seenModelNames.has(key) ? false : (seenModelNames.add(key), true);
+                });
 
                 setLocalModels(localModelsList);
 
@@ -1074,25 +1142,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     }
 
                                     if (!isOnlineMode && !hasApiKey) {
-                                        // No API key — prompt the user to add one.
-                                        // When they save, the onComplete callback enables online mode.
-                                        showOpenRouterApiKeyModal(
-                                            (newKey) => {
-                                                onOpenRouterApiKeyChange?.(newKey);
-                                            },
-                                            setApiKey,
-                                            () => {
-                                                // After key is saved: auto-select an OpenRouter model and enable online mode
-                                                if (selectedModel?.source === 'local' && openRouterModels.length > 0) {
-                                                    onSelectedModelChange?.({
-                                                        id: openRouterModels[0].id,
-                                                        name: openRouterModels[0].name,
-                                                        source: 'openrouter'
-                                                    });
-                                                }
-                                                onToggleOnlineMode?.(true);
+                                        // No API key — open the portal modal.
+                                        // Callbacks are stored in refs so they stay current.
+                                        orOnKeySavedRef.current = (newKey) => { onOpenRouterApiKeyChange?.(newKey); };
+                                        orOnCompleteRef.current = () => {
+                                            if (selectedModel?.source === 'local' && openRouterModels.length > 0) {
+                                                onSelectedModelChange?.({
+                                                    id: openRouterModels[0].id,
+                                                    name: openRouterModels[0].name,
+                                                    source: 'openrouter',
+                                                });
                                             }
-                                        );
+                                            onToggleOnlineMode?.(true);
+                                        };
+                                        setOrModalStep('choice');
                                     } else {
                                         // Switching to ONLINE with existing API key
                                         if (!openRouterApiKey && localStorage.getItem('aud-io-openrouter-key')) {
@@ -1169,6 +1232,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 </div>
             </header>
 
+            {/* Body — flex wrapper so we can center messages+input together in welcome mode */}
+            <div className={`chat-body${!hasMessages ? ' welcome-mode' : ''}`}>
+
             {/* Messages Area */}
             <main className="chat-messages">
                 <div className="chat-messages-container">
@@ -1179,7 +1245,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 <svg width="32" height="32" viewBox="0 0 40 40" fill="none" className="chat-welcome-logo-inline">
                                     <polygon points="20,4 36,36 4,36" stroke="currentColor" strokeWidth="2.5" fill="none" strokeLinejoin="round" />
                                 </svg>
-                                _Aud.io <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>|</span> Chat Interface
+                                <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>|</span> Chat Interface
                             </h1>
                             <p className="chat-welcome-subtitle">Ask anything to get started</p>
 
@@ -1192,19 +1258,21 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                             const { text, fileNames } = parseUserMessage(msg.content);
                             return (
                                 <div key={idx} className="message-wrapper user">
-                                    <div className="message-bubble user">
-                                        {/* File attachment chips — shown above message text, like ChatGPT/Claude.ai */}
+                                    <div className="message-user-group">
+                                        {/* File attachment cards — shown above the message bubble, like Perplexity/DeepSeek */}
                                         {fileNames.length > 0 && (
-                                            <div className="message-attachments">
+                                            <div className="message-file-cards">
                                                 {fileNames.map((name, i) => (
-                                                    <span key={i} className="message-attachment-chip">
-                                                        <span className="message-attachment-icon">{getFileIcon(name)}</span>
-                                                        <span className="message-attachment-name">{name}</span>
-                                                    </span>
+                                                    <div key={i} className="message-file-card">
+                                                        <span className="message-file-card-icon">{getFileIcon(name)}</span>
+                                                        <span className="message-file-card-name">{name}</span>
+                                                    </div>
                                                 ))}
                                             </div>
                                         )}
-                                        <MessageContent content={text} role="user" />
+                                        <div className="message-bubble user">
+                                            <MessageContent content={text} role="user" />
+                                        </div>
                                     </div>
                                 </div>
                             );
@@ -1233,15 +1301,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
             {/* Input Bar - no footer compartment */}
             <div className="chat-input-bar" style={{ position: 'relative' }}>
-                {/* Model Prompt Banner - shown based on user setup status */}
+                {/* Model Prompt Banner — in welcome mode this is ordered BELOW the form via CSS */}
                 {showModelPromptBanner && (
-                    <ModelPromptBanner
-                        isOnlineMode={isOnlineMode}
-                        hasApiKey={!!(openRouterApiKey || localStorage.getItem('aud-io-openrouter-key'))}
-                        hasLocalModel={hasOfflineCapability}
-                        onOpenModels={(focusApiKey = false, focusHfToken = false) => onOpenModels?.(focusApiKey, focusHfToken)}
-                        onToggleOnlineMode={onToggleOnlineMode}
-                    />
+                    <div className="model-prompt-banner-wrapper">
+                        <ModelPromptBanner
+                            isOnlineMode={isOnlineMode}
+                            hasApiKey={!!(openRouterApiKey || localStorage.getItem('aud-io-openrouter-key'))}
+                            hasLocalModel={hasOfflineCapability}
+                            onOpenModels={(focusApiKey = false, focusHfToken = false) => onOpenModels?.(focusApiKey, focusHfToken)}
+                            onToggleOnlineMode={onToggleOnlineMode}
+                        />
+                    </div>
                 )}
                 {/* Attachment Tray - above input box */}
                 {(attachedFiles.length > 0 || localFileAttachments.length > 0) && (
@@ -1306,7 +1376,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 value={input}
                                 onChange={handleInputChange}
                                 onKeyDown={handleInputKeyDown}
-                                placeholder="Ask anything (type @ or click 📁 for Local Storage files)"
+                                placeholder="Ask anything (type @ for adding local storage files)"
                                 className="chat-input"
                             />
                             {/* @filename autocomplete dropdown — curated files only */}
@@ -1377,6 +1447,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     <p className="chat-disclaimer">AI can make mistakes. Please verify important information.</p>
                 </form>
             </div>
+            {/* End chat-body */}
+            </div>
 
             {/* Delete Confirmation Modal */}
             {showDeleteConfirm && (
@@ -1417,6 +1489,69 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* ── OpenRouter API Key Modal (React portal — always inside Tauri webview) ── */}
+            {orModalStep !== 'none' && createPortal(
+                <div
+                    style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.55)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000, fontFamily: 'sans-serif' }}
+                    onClick={(e) => { if (e.target === e.currentTarget) closeOrModal(); }}
+                >
+                    <div style={{ background: 'white', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'black', position: 'relative' }}>
+                        {/* Close */}
+                        <button onClick={closeOrModal} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
+                        {orModalStep === 'choice' && (
+                            <>
+                                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 12, textAlign: 'center', fontSize: 18 }}>OpenRouter API Key Needed</h3>
+                                <p style={{ color: '#374151', textAlign: 'center', fontSize: 14, marginBottom: 20 }}>Access powerful AI models by adding your OpenRouter API key.</p>
+                                <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                                    <button
+                                        onClick={() => { openInBrowser('https://openrouter.ai/keys'); closeOrModal(); }}
+                                        style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                                        onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
+                                        onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                                    >Create API Key</button>
+                                    <button
+                                        onClick={() => setOrModalStep('input')}
+                                        style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                                        onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
+                                        onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                                    >Enter Existing Key</button>
+                                </div>
+                            </>
+                        )}
+                        {orModalStep === 'input' && (
+                            <>
+                                {/* Back */}
+                                <button onClick={() => setOrModalStep('choice')} style={{ position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>←</button>
+                                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 10, textAlign: 'center', fontSize: 18 }}>Enter OpenRouter API Key</h3>
+                                <p style={{ color: '#374151', textAlign: 'center', fontSize: 13, marginBottom: 16 }}>
+                                    Paste your key below. Get one at{' '}
+                                    <a href="#" onClick={(e) => { e.preventDefault(); openInBrowser('https://openrouter.ai/keys'); }} style={{ color: '#2563eb', textDecoration: 'none' }}>openrouter.ai/keys</a>
+                                </p>
+                                <input
+                                    ref={orKeyRef}
+                                    type="password"
+                                    placeholder="sk-or-v1-..."
+                                    value={orKeyInput}
+                                    onChange={(e) => setOrKeyInput(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Enter' && saveOrKey()}
+                                    style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${orKeyError ? '#ef4444' : '#d1d5db'}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 6, outline: 'none' }}
+                                />
+                                {orKeyInputError && (
+                                    <p style={{ color: '#ef4444', fontSize: '12px', marginBottom: 12, textAlign: 'center' }}>{orKeyInputError}</p>
+                                )}
+                                <button
+                                    onClick={saveOrKey}
+                                    style={{ width: '100%', padding: '11px 16px', background: '#000', color: 'white', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}
+                                    onMouseOver={(e) => { e.currentTarget.style.background = '#1e40af'; }}
+                                    onMouseOut={(e) => { e.currentTarget.style.background = '#000'; }}
+                                >Save API Key</button>
+                            </>
+                        )}
+                    </div>
+                </div>,
+                document.body
             )}
         </div>
     );

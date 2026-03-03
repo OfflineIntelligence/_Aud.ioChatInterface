@@ -4,6 +4,24 @@ use std::io::{Read, Cursor};
 use tracing::{debug, info};
 use anyhow::Result;
 
+// macOS: Core Graphics PDF C API — always available on macOS regardless of chip
+// (CoreGraphics framework is already linked transitively by the core-graphics crate)
+#[cfg(target_os = "macos")]
+use core_graphics::geometry::CGRect;
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn CGPDFDocumentCreateWithProvider(provider: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGPDFDocumentGetNumberOfPages(document: *mut std::ffi::c_void) -> usize;
+    fn CGPDFDocumentGetPage(document: *mut std::ffi::c_void, page_index: usize) -> *mut std::ffi::c_void;
+    fn CGPDFPageGetBoxRect(page: *mut std::ffi::c_void, box_type: i32) -> CGRect;
+    fn CGContextDrawPDFPage(context: *mut std::ffi::c_void, page: *mut std::ffi::c_void);
+    fn CGContextScaleCTM(context: *mut std::ffi::c_void, sx: f64, sy: f64);
+    fn CGContextTranslateCTM(context: *mut std::ffi::c_void, tx: f64, ty: f64);
+    fn CGPDFDocumentRelease(document: *mut std::ffi::c_void);
+    fn CGPDFPageRelease(page: *mut std::ffi::c_void);
+}
+
 /// Rough token estimate: 1 token ≈ 4 characters (common approximation).
 pub fn estimate_tokens(text: &str) -> usize {
     (text.len() + 3) / 4
@@ -279,83 +297,169 @@ fn windows_ocr_pdf(bytes: &[u8]) -> Option<String> {
 
 // ── macOS OCR ──────────────────────────────────────────────────────────────
 
+/// Render each PDF page with Core Graphics and run Vision OCR on the result.
+/// Works on both Apple Silicon (ARM64, uses Neural Engine) and Intel (x86_64, uses CPU).
+/// Returns `None` when the PDF is empty, unreadable, or yields no text.
 #[cfg(target_os = "macos")]
 fn macos_ocr_pdf(bytes: &[u8]) -> Option<String> {
-    use pdf::file::FileOptions;
-    use std::io::Cursor;
-    use objc2_foundation::{NSData, NSArray, NSMutableArray, NSNumber, NSDictionary};
-    use objc2_vision::{VNImageRequestHandler, VNRecognizeTextRequest, VNImageSource};
-    use core_graphics::image::CGImage;
+    use std::ffi::c_void;
+    use std::sync::Arc;
+    use core_graphics::{
+        color_space::CGColorSpace,
+        context::CGContext,
+        data_provider::CGDataProvider,
+    };
+    use objc2::rc::Retained;
+    use objc2_foundation::{NSArray, NSData, NSDictionary, NSString};
+    use objc2_vision::{
+        VNImageRequestHandler, VNRecognizeTextRequest,
+        VNRequest, VNRequestTextRecognitionLevel,
+    };
+
+    // kCGImageAlphaNoneSkipLast (4) — RGBX pixel format, ignore the 4th byte as alpha.
+    // Using a plain u32 avoids depending on a specific CGBitmapInfo constant path.
+    const BITMAP_INFO: u32 = 4;
 
     let run = || -> Result<String, String> {
-        // Load PDF document
-        let cursor = Cursor::new(bytes);
-        let file = FileOptions::cached()
-            .open(cursor)
-            .map_err(|e| format!("Failed to open PDF: {}", e))?;
+        // ── 1. Load PDF bytes into a CGPDFDocument ───────────────────────────
+        //
+        // CGDataProvider::from_buffer keeps the Arc alive for the provider's lifetime,
+        // so the underlying bytes are valid for as long as we need the document.
+        let pdf_data: Arc<Vec<u8>> = Arc::new(bytes.to_vec());
+        let provider = CGDataProvider::from_buffer(pdf_data);
 
-        let page_count = file.num_pages();
+        let doc = unsafe {
+            CGPDFDocumentCreateWithProvider(provider.as_ptr() as *mut c_void)
+        };
+        if doc.is_null() {
+            return Err("CGPDFDocumentCreateWithProvider returned null".into());
+        }
+
+        let page_count = unsafe { CGPDFDocumentGetNumberOfPages(doc) };
         if page_count == 0 {
+            unsafe { CGPDFDocumentRelease(doc) };
             return Ok(String::new());
         }
 
+        info!("macOS PDF OCR: {} page(s)", page_count);
         let mut all_text = String::new();
 
-        for page_idx in 0..page_count {
-            // Render page to RGBA image
-            let page = file.get_page(page_idx as usize)
-                .map_err(|e| format!("Failed to get page {}: {}", page_idx, e))?;
+        // ── 2. Per-page: render → PNG → Vision OCR ──────────────────────────
+        //
+        // CGPDFDocument uses 1-based page indexing.
+        for page_idx in 1..=page_count {
+            let page = unsafe { CGPDFDocumentGetPage(doc, page_idx) };
+            if page.is_null() {
+                continue;
+            }
 
-            let width = page.width() as usize;
-            let height = page.height() as usize;
+            // PDF page dimensions are in points (72 pt = 1 inch).
+            // kCGPDFMediaBox = 0 — the full physical page rectangle.
+            let media_box = unsafe { CGPDFPageGetBoxRect(page, 0) };
+            let pt_w = media_box.size.width;
+            let pt_h = media_box.size.height;
 
-            let img_buffer = page
-                .to_rgba8()
-                .map_err(|e| format!("Failed to render page {}: {}", page_idx, e))?;
+            // Scale to 150 DPI: good balance between OCR accuracy and memory.
+            let scale = 150.0_f64 / 72.0;
+            let px_w = ((pt_w * scale).ceil() as usize).max(1);
+            let px_h = ((pt_h * scale).ceil() as usize).max(1);
+            let bytes_per_row = px_w * 4; // 4 bytes/pixel (RGBX)
 
-            // Create CGImage directly from RGBA data
-            let color_space = CGImage::ColorSpace::create_device_rgb();
-            let bits_per_component = 8u32;
-            let bytes_per_row = width * 4;
+            // Allocate a white pixel buffer — pages with transparency get a white bg.
+            let mut pixel_buf = vec![255u8; bytes_per_row * px_h];
 
-            let cg_image = CGImage::new(
-                img_buffer.as_raw(),
-                width as u32,
-                height as u32,
-                bits_per_component,
-                32u32,
-                color_space,
-                CGImage::BitmapInfo::from_byte_order(CGImage::ByteOrder::Default),
-                None,
-                false,
-                core_graphics::rendering_intent::RenderingIntent::Default,
-            ).map_err(|e| format!("Failed to create CGImage: {}", e))?;
+            let color_space = CGColorSpace::create_device_rgb();
+            let ctx = unsafe {
+                CGContext::create_bitmap_context(
+                    Some(pixel_buf.as_mut_ptr() as *mut c_void),
+                    px_w,
+                    px_h,
+                    8,             // bits per component
+                    bytes_per_row,
+                    &color_space,
+                    BITMAP_INFO,
+                )
+            };
+            let ctx_ptr = ctx.as_ptr() as *mut c_void;
 
-            // Perform OCR using VNImageRequestHandler with CGImage
-            let handler = VNImageRequestHandler::from_cg_image(&cg_image, None)
-                .map_err(|e| format!("Failed to create image handler: {}", e))?;
+            // PDF coordinate origin is bottom-left; CGBitmapContext origin is top-left.
+            // Flip Y: translate to the top of the context, then negate the Y scale.
+            unsafe {
+                CGContextTranslateCTM(ctx_ptr, 0.0, px_h as f64);
+                CGContextScaleCTM(ctx_ptr, scale, -scale);
+                CGContextDrawPDFPage(ctx_ptr, page);
+            }
+            unsafe { CGPDFPageRelease(page) };
 
-            let request = VNRecognizeTextRequest::new(None, None, None)
-                .map_err(|e| format!("Failed to create OCR request: {}", e))?;
+            // Drop the context to flush any deferred drawing before reading pixel_buf.
+            drop(ctx);
 
-            request.set_recognition_level(1).ok();
-            request.set_uses_language_correction(true).ok();
+            // ── 3. Encode rendered pixels to PNG ──────────────────────────────
+            //
+            // Vision's initWithData:options: accepts any image format that NSImage
+            // can decode (PNG, JPEG, TIFF, …).  PNG is lossless and zero-dependency.
+            let mut png_bytes: Vec<u8> = Vec::new();
+            {
+                let mut enc = png::Encoder::new(&mut png_bytes, px_w as u32, px_h as u32);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                enc.write_header()
+                    .and_then(|mut w| w.write_image_data(&pixel_buf))
+                    .map_err(|e| format!("PNG encode failed on page {page_idx}: {e}"))?;
+            }
 
-            let results = handler.perform_requests(&[request])
-                .map_err(|e| format!("OCR failed: {}", e))?;
+            info!(
+                "Page {page_idx} rendered {px_w}×{px_h} px ({} PNG bytes)",
+                png_bytes.len()
+            );
 
-            if let Some(observations) = results.first() {
-                for observation in observations {
-                    if let Some(text) = observation.text() {
-                        if !text.is_empty() {
-                            all_text.push_str(&text);
-                            all_text.push('\n');
+            // ── 4. Vision OCR ──────────────────────────────────────────────────
+            unsafe {
+                let ns_data = NSData::with_bytes(&png_bytes);
+                let options = NSDictionary::<NSString, objc2::runtime::AnyObject>::new();
+
+                let handler = VNImageRequestHandler::initWithData_options(
+                    VNImageRequestHandler::alloc(),
+                    &ns_data,
+                    &options,
+                );
+
+                let request =
+                    VNRecognizeTextRequest::init(VNRecognizeTextRequest::alloc());
+
+                // Accurate mode uses the Neural Engine on Apple Silicon;
+                // falls back to CPU on Intel — both handled transparently by Vision.
+                request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+                request.setUsesLanguageCorrection(true);
+
+                // performRequests:error: expects NSArray<VNRequest>.
+                // VNRecognizeTextRequest IS-A VNRequest via Objective-C inheritance.
+                // Rust deref coercion traverses: Retained<VNRecognizeTextRequest>
+                //   → VNRecognizeTextRequest → VNImageBasedRequest → VNRequest
+                let req_as_base: &VNRequest = &*request;
+                let req_array = NSArray::from_slice(&[req_as_base]);
+
+                // Ignore the return value; if it fails, results() will be None.
+                let _ = handler.performRequests_error(&*req_array);
+
+                if let Some(results) = request.results() {
+                    for obs in results.iter() {
+                        // topCandidates(1) returns the single best candidate string.
+                        let candidates = obs.topCandidates(1);
+                        if let Some(top) = candidates.firstObject() {
+                            let text = top.string().to_string();
+                            if !text.is_empty() {
+                                all_text.push_str(&text);
+                                all_text.push('\n');
+                            }
                         }
                     }
                 }
             }
         }
 
+        unsafe { CGPDFDocumentRelease(doc) };
+        info!("macOS PDF OCR complete: {} chars", all_text.len());
         Ok(all_text)
     };
 
@@ -366,7 +470,7 @@ fn macos_ocr_pdf(bytes: &[u8]) -> Option<String> {
             None
         }
         Err(e) => {
-            debug!("macOS OCR failed: {}", e);
+            debug!("macOS OCR failed: {e}");
             None
         }
     }

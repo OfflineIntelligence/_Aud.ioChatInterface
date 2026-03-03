@@ -28,8 +28,19 @@ fn main() {
                     }
                     if let Some((key, value)) = line.split_once('=') {
                         let key = key.trim();
-                        // Only forward the two OAuth credentials.
-                        if key != "GOOGLE_CLIENT_ID" && key != "GOOGLE_CLIENT_SECRET" {
+                        // Forward OAuth credentials and SMTP settings so they're
+                        // baked into the binary for distributed / installed builds
+                        // (no .env file is bundled with the installer).
+                        let allowed = matches!(
+                            key,
+                            "GOOGLE_CLIENT_ID"
+                                | "GOOGLE_CLIENT_SECRET"
+                                | "SMTP_HOST"
+                                | "SMTP_PORT"
+                                | "SMTP_USER"
+                                | "SMTP_PASS"
+                        );
+                        if !allowed {
                             continue;
                         }
                         // Strip optional surrounding quotes from the value.
@@ -56,4 +67,8 @@ fn main() {
     // Also re-run if the env vars are changed directly in the shell.
     println!("cargo:rerun-if-env-changed=GOOGLE_CLIENT_ID");
     println!("cargo:rerun-if-env-changed=GOOGLE_CLIENT_SECRET");
+    println!("cargo:rerun-if-env-changed=SMTP_HOST");
+    println!("cargo:rerun-if-env-changed=SMTP_PORT");
+    println!("cargo:rerun-if-env-changed=SMTP_USER");
+    println!("cargo:rerun-if-env-changed=SMTP_PASS");
 }
