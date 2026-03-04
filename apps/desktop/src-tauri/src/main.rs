@@ -96,9 +96,26 @@ fn fatal_error(message: &str) -> ! {
             MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x10 /* MB_ICONERROR */);
         }
     }
-    #[cfg(not(target_os = "windows"))]
+
+    // On macOS, show a native alert dialog via osascript so the user sees
+    // the error when launching from Finder (no terminal / stderr visible).
+    #[cfg(target_os = "macos")]
     {
-        // On non-Windows, stderr is the best we have before Tauri starts
+        // Escape backslashes and double-quotes for the AppleScript string literal.
+        let safe_msg = full_message.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!(
+            "display dialog \"{}\" with title \"Aud.io - Startup Error\" \
+             buttons {{\"OK\"}} default button \"OK\" with icon stop",
+            safe_msg
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        // Linux / other: stderr is the best we have before Tauri starts
         eprintln!("{}", full_message);
     }
 
@@ -151,9 +168,34 @@ fn main() {
                             }
                         }
                     }
-                    #[cfg(not(target_os = "windows"))]
+                    // macOS: /proc does not exist. Use `kill -0 <pid>` to probe
+                    // whether the process is alive without sending a signal.
+                    #[cfg(target_os = "macos")]
                     {
-                        // On Unix, check /proc/{pid}
+                        let alive = std::process::Command::new("kill")
+                            .args(["-0", &existing_pid.to_string()])
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false);
+
+                        if alive {
+                            fatal_error(&format!(
+                                "Another instance of Aud.io is already running (PID: {}).\n\n\
+                                Only one instance can run at a time to avoid port conflicts.\n\n\
+                                To close the existing instance run:\n\
+                                  kill {}",
+                                existing_pid, existing_pid
+                            ));
+                        } else {
+                            // Stale lock file from a crashed process
+                            log_startup(&format!("Removing stale lock file (PID {} not running)", existing_pid));
+                            let _ = std::fs::remove_file(&lock_file);
+                        }
+                    }
+
+                    // Linux: /proc/{pid} exists iff the process is alive
+                    #[cfg(target_os = "linux")]
+                    {
                         let proc_path = std::path::Path::new("/proc").join(existing_pid.to_string());
                         if proc_path.exists() {
                             fatal_error(&format!(
@@ -167,6 +209,13 @@ fn main() {
                             log_startup(&format!("Removing stale lock file (PID {} not running)", existing_pid));
                             let _ = std::fs::remove_file(&lock_file);
                         }
+                    }
+
+                    // Other Unix (BSDs, etc.): fall through and allow startup
+                    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+                    {
+                        log_startup(&format!("Cannot verify PID {} on this platform, assuming stale lock", existing_pid));
+                        let _ = std::fs::remove_file(&lock_file);
                     }
                 }
             }
@@ -231,6 +280,9 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("Failed to receive port from backend: {}", e);
+                    // Send sentinel 0 immediately so the main thread's
+                    // actual_port_rx.recv_timeout() fails fast instead of waiting 60 s.
+                    let _ = actual_port_tx.send(0);
                     let _ = ready_tx.send(false);
                     return;
                 }
@@ -300,6 +352,7 @@ fn main() {
     // - Slow system startup
     // - Antivirus scanning delays
     let actual_port = match actual_port_rx.recv_timeout(Duration::from_secs(60)) {
+        Ok(0) => fatal_error("Backend thread crashed before binding a port. Check startup.log for the Rust panic or initialization error."),
         Ok(port) => {
             log_startup(&format!("Backend port confirmed: {}", port));
             port

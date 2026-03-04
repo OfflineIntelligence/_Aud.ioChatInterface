@@ -10,21 +10,49 @@
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
 
-    <!-- Enable outgoing network connections for model downloads and API calls -->
+    <!-- CRITICAL: Allow loading third-party dylibs not signed by Apple.
+         llama-server (downloaded at runtime) ships with libllama.dylib,
+         libggml.dylib, libggml-cpu.dylib, libggml-metal.dylib etc.
+         Without this, Hardened Runtime blocks those dylibs from loading
+         and llama-server exits immediately with a dyld error. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Allow DYLD_LIBRARY_PATH to be set in child-process environments.
+         Required so llama-server can find its co-located dylibs when the
+         working directory differs from the binary directory. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- Enable outgoing network connections for model downloads, HuggingFace
+         API, OpenRouter proxy, and Google OAuth token exchange -->
     <key>com.apple.security.network.client</key>
     <true/>
 
-    <!-- Enable incoming connections for the local backend server (port 8000) and
-         the Google OAuth loopback callback (http://127.0.0.1:{port}/auth/google/callback) -->
+    <!-- Enable incoming connections for the local axum backend server
+         (default port 9999 / fallback 8002-8999) and for the Google OAuth
+         loopback callback (http://127.0.0.1:{port}/auth/google/callback) -->
     <key>com.apple.security.network.server</key>
     <true/>
 
-    <!-- Allow reading and writing user-selected files (model files, exports, logs) -->
+    <!-- Allow reading and writing files selected by the user via the OS
+         file-picker dialog (model files, document attachments, exports) -->
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
 
-    <!-- Allow reading and writing to application support directory -->
+    <!-- Allow reading and writing to the Downloads directory so the engine
+         downloader can stage archives before extracting them -->
     <key>com.apple.security.files.downloads.read-write</key>
     <true/>
+
+    <!-- Required for the OS Keychain (login keychain) to be accessible from a
+         Hardened Runtime binary. Without this entitlement, Security.framework
+         returns errSecAuthFailed / errSecInteractionNotAllowed in notarized builds
+         and the keyring crate falls back to insecure XOR obfuscation.
+         The $(AppIdentifierPrefix) macro is expanded to your Team ID by codesign. -->
+    <key>com.apple.security.keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.offline-intelligence.audiodesktop</string>
+    </array>
 </dict>
 </plist>

@@ -49,24 +49,30 @@ pub async fn online_stream(
     info!("Online stream request for session: {}", req.session_id);
 
     // Debug: Log what we received
-    debug!("Request api_key present: {}, length: {}", 
-        req.api_key.is_some(), 
-        req.api_key.as_ref().map(|k| k.len()).unwrap_or(0)
+    debug!("Request api_key present: {}", 
+        req.api_key.is_some()
     );
 
-    // Get OpenRouter API key - prioritize the one passed in request
-    let api_key = req.api_key.clone().unwrap_or_else(|| {
-        std::env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
-            // Try to get from state or config
-            state.shared_state.config.openrouter_api_key.clone()
-        })
-    });
+    // Get OpenRouter API key - priority order:
+    // 1. Frontend-passed key (for backward compatibility)
+    // 2. Database stored keys (persisted, synced)
+    // 3. Environment variables
+    // 4. Config file
+    let api_key = if let Some(key) = &req.api_key {
+        if !key.is_empty() {
+            key.clone()
+        } else {
+            state.get_openrouter_api_key().await.unwrap_or_default()
+        }
+    } else {
+        state.get_openrouter_api_key().await.unwrap_or_default()
+    };
 
     debug!("Final API key length: {}", api_key.len());
 
     if api_key.is_empty() {
-        error!("OpenRouter API key is empty - request had key: {}", req.api_key.is_some());
-        return (StatusCode::UNAUTHORIZED, "OpenRouter API key not configured").into_response();
+        error!("OpenRouter API key is empty");
+        return (StatusCode::UNAUTHORIZED, "OpenRouter API key not configured. Please add your API key in Settings.").into_response();
     }
 
     // Prepare messages in OpenRouter format

@@ -453,17 +453,18 @@ pub async fn refresh_models(
 
     // Refresh OpenRouter catalog if requested
     if source == "openrouter" || source == "all" {
-        let env_key = env::var("OPENROUTER_API_KEY").ok();
-        let api_key = payload
-            .openrouter_api_key
-            .as_deref()
-            .or(env_key.as_deref());
+        // Priority: 1) Frontend-passed key, 2) Database stored key, 3) Env var, 4) Config
+        let api_key = if let Some(key) = &payload.openrouter_api_key {
+            if !key.is_empty() { Some(key.clone()) } else { state.get_openrouter_api_key().await }
+        } else {
+            state.get_openrouter_api_key().await
+        };
 
         if let Some(key) = api_key {
+            info!("Refreshing OpenRouter catalog with stored API key");
             let mut registry = model_manager.registry.write().await;
-            if let Err(e) = registry.refresh_openrouter_catalog_from_api(key).await {
+            if let Err(e) = registry.refresh_openrouter_catalog_from_api(&key).await {
                 error!("Failed to refresh OpenRouter catalog: {}", e);
-                // Continue with other sources instead of returning error
             } else {
                 updated_sources.push("openrouter".to_string());
             }
@@ -471,7 +472,7 @@ pub async fn refresh_models(
                 error!("Failed to save model registry after OpenRouter refresh: {}", e);
             }
         } else {
-            info!("No OpenRouter API key provided - loading default OpenRouter catalog");
+            info!("No OpenRouter API key available - loading default OpenRouter catalog");
             // Load default popular OpenRouter models so users can see what's available
             let mut registry = model_manager.registry.write().await;
             registry.populate_default_openrouter_models().await;
@@ -484,11 +485,12 @@ pub async fn refresh_models(
     }
 
     // Refresh Hugging Face GGUF/GGML catalog if requested
+    // Token is mainly used for downloading gated models, not for catalog refresh
     if source == "huggingface" || source == "all" {
         let mut registry = model_manager.registry.write().await;
         // Fetch top 100 GGUF models by downloads
         if let Err(e) = registry.refresh_huggingface_catalog_from_api(100).await {
-            error!("Failed to refresh Hugging Face catalog: {}", e);
+            error!("Failed to refresh HuggingFace catalog: {}", e);
             // Continue - don't fail the entire refresh
         } else {
             updated_sources.push("huggingface".to_string());

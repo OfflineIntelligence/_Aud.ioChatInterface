@@ -22,7 +22,8 @@
                 "fullscreen": false,
                 "url": "index.html",
                 "center": true,
-                "visible": true
+                "visible": true,
+                "devtools": true
             }
         ],
         "security": {
@@ -45,7 +46,22 @@
         "macOS": {
             "entitlements": "entitlements.plist",
             "minimumSystemVersion": "10.15",
-            "signingIdentity": null
+            "signingIdentity": null,
+            "infoPlist": {
+                "NSAppTransportSecurity": {
+                    "NSAllowsLocalNetworking": true,
+                    "NSExceptionDomains": {
+                        "localhost": {
+                            "NSExceptionAllowsInsecureHTTPLoads": true,
+                            "NSIncludesSubdomains": false
+                        },
+                        "127.0.0.1": {
+                            "NSExceptionAllowsInsecureHTTPLoads": true,
+                            "NSIncludesSubdomains": false
+                        }
+                    }
+                }
+            }
         }
     }
 }

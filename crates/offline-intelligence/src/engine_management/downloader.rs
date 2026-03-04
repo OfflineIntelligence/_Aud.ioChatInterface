@@ -172,18 +172,39 @@ impl EngineDownloader {
             return Err(anyhow::anyhow!("Unsupported archive format"));
         }
         
-        // Make binary executable on Unix systems
+        // Make ALL extracted files executable on Unix (macOS + Linux).
+        // llama.cpp releases ship with multiple dylibs alongside the binary
+        // (libllama.dylib, libggml.dylib, libggml-metal.dylib, etc.).
+        // Only chmod-ing the main binary leaves the dylibs at the archive's
+        // default mode (often 0o644), which prevents dlopen from loading them.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let binary_path = install_path.join(&engine_info.binary_name);
-            if binary_path.exists() {
-                let mut perms = fs::metadata(&binary_path).await?.permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&binary_path, perms).await?;
+            if let Ok(entries) = std::fs::read_dir(&install_path) {
+                for entry in entries.flatten() {
+                    let entry_path = entry.path();
+                    if entry_path.is_file() {
+                        if let Ok(meta) = std::fs::metadata(&entry_path) {
+                            let mut perms = meta.permissions();
+                            perms.set_mode(0o755);
+                            let _ = std::fs::set_permissions(&entry_path, perms);
+                        }
+                    }
+                }
             }
         }
-        
+
+        // On macOS: remove the Gatekeeper quarantine extended attribute from
+        // every file in the installation directory.
+        //
+        // Any file fetched programmatically (not opened by the user in Finder)
+        // gets `com.apple.quarantine` set by the OS.  Running a quarantined
+        // binary triggers a "Developer cannot be verified" dialog or a silent
+        // "Operation not permitted" error.  `xattr -r -d` applies recursively
+        // so all dylibs are also cleared in one call.
+        #[cfg(target_os = "macos")]
+        self.remove_quarantine_attribute(&install_path).await;
+
         // Save engine metadata
         self.save_engine_metadata(engine_info, &install_path).await?;
         
@@ -328,27 +349,72 @@ impl EngineDownloader {
     /// Verify that the engine was installed correctly
     async fn verify_installation(&self, engine_info: &EngineInfo, install_path: &PathBuf) -> Result<()> {
         let binary_path = install_path.join(&engine_info.binary_name);
-        
+
         if !binary_path.exists() {
             return Err(anyhow::anyhow!("Engine binary not found at {:?}", binary_path));
         }
-        
-        // Test that the binary is executable
-        let output = tokio::process::Command::new(&binary_path)
+
+        // Test that the binary can be spawned.  We intentionally ignore the
+        // exit code: `llama-server --help` exits with code 1 on many llama.cpp
+        // builds (it prints help text then returns 1), so checking
+        // `status.success()` would incorrectly reject a healthy binary.
+        // What matters is that the OS was able to execute it at all.
+        match tokio::process::Command::new(&binary_path)
             .arg("--help")
             .output()
-            .await;
-            
-        match output {
-            Ok(output) if output.status.success() => {
-                info!("Engine binary verified successfully");
+            .await
+        {
+            Ok(_) => {
+                info!("Engine binary verified: {:?}", binary_path);
                 Ok(())
             }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(anyhow::anyhow!("Engine binary test failed: {}", stderr))
+            Err(e) => {
+                let hint = if cfg!(target_os = "macos") {
+                    format!(
+                        "Failed to execute engine binary: {}.\n\
+                         On macOS this is usually Gatekeeper quarantine — try:\n\
+                           xattr -r -d com.apple.quarantine {:?}",
+                        e, binary_path
+                    )
+                } else {
+                    format!("Failed to execute engine binary: {}", e)
+                };
+                Err(anyhow::anyhow!("{}", hint))
             }
-            Err(e) => Err(anyhow::anyhow!("Failed to execute engine binary: {}", e))
+        }
+    }
+
+    /// Remove the macOS Gatekeeper quarantine extended attribute from every
+    /// file in `dir` so that programmatically-downloaded binaries and dylibs
+    /// can be executed without a "Developer cannot be verified" dialog.
+    ///
+    /// Uses `xattr -r -d com.apple.quarantine <dir>` which is available on
+    /// all macOS versions that Tauri targets (10.13+).  Errors are logged but
+    /// not propagated — a failed removal is non-fatal because the binary may
+    /// still work if Gatekeeper decides not to block it.
+    #[cfg(target_os = "macos")]
+    async fn remove_quarantine_attribute(&self, dir: &PathBuf) {
+        let dir_owned = dir.clone();
+        match tokio::process::Command::new("xattr")
+            .args(["-r", "-d", "com.apple.quarantine"])
+            .arg(&dir_owned)
+            .output()
+            .await
+        {
+            Ok(output) => {
+                if output.status.success() {
+                    info!("Removed quarantine attribute from {:?}", dir_owned);
+                } else {
+                    // xattr exits non-zero when no quarantine attr exists — not an error
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stderr.contains("No such xattr") && !stderr.trim().is_empty() {
+                        tracing::warn!("xattr removal warning for {:?}: {}", dir_owned, stderr.trim());
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not run xattr to remove quarantine from {:?}: {}", dir_owned, e);
+            }
         }
     }
 

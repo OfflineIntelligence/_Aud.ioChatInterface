@@ -5,7 +5,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use sysinfo::System;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // NVIDIA GPU detection only available when nvidia feature is enabled (Windows and Linux)
 #[cfg(all(feature = "nvidia", any(target_os = "windows", target_os = "linux")))]
@@ -63,7 +63,49 @@ impl Config {
                     }
                 }
 
-                // 2. If not found in exe dir, try project root (../../ from target/release/)
+                // 2a. macOS .app bundle: exe is at App.app/Contents/MacOS/binary
+                //     Resources live at App.app/Contents/Resources/.env
+                #[cfg(target_os = "macos")]
+                if !env_loaded {
+                    // exe_dir = App.app/Contents/MacOS/
+                    // parent  = App.app/Contents/
+                    if let Some(contents_dir) = exe_dir.parent() {
+                        let bundle_env = contents_dir.join("Resources").join(".env");
+                        if bundle_env.exists() {
+                            match dotenvy::from_path(&bundle_env) {
+                                Ok(_) => {
+                                    info!("Loaded .env from macOS bundle Resources: {:?}", bundle_env);
+                                    env_loaded = true;
+                                }
+                                Err(e) => {
+                                    warn!("Failed to load .env from bundle Resources {:?}: {}", bundle_env, e);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2b. macOS: also try ~/Library/Application Support/Aud.io/.env
+                //     This allows post-install configuration without modifying the bundle.
+                #[cfg(target_os = "macos")]
+                if !env_loaded {
+                    if let Some(app_support) = dirs::data_dir() {
+                        let user_env = app_support.join("Aud.io").join(".env");
+                        if user_env.exists() {
+                            match dotenvy::from_path(&user_env) {
+                                Ok(_) => {
+                                    info!("Loaded .env from user data directory: {:?}", user_env);
+                                    env_loaded = true;
+                                }
+                                Err(e) => {
+                                    warn!("Failed to load .env from user data dir {:?}: {}", user_env, e);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2c. Development: try project root (../../ from target/release/ or target\release\)
                 if !env_loaded {
                     let project_root = if exe_dir.ends_with("target/release")
                         || exe_dir.ends_with("target\\release")
@@ -357,16 +399,51 @@ impl Config {
             let bin_dir = base_dir.join(resource_folder).join("bin").join(os_folder);
 
             if bin_dir.exists() {
-                // Search for the binary in subdirectories (e.g., llama-b6970-bin-win-cuda-12.4-x64/)
+                // Search for the binary in subdirectories (e.g., llama-b6970-bin-macos-arm64/)
+                // On macOS we must skip subdirectories built for the other architecture so that
+                // an Intel Mac does not accidentally load an arm64 binary (and vice-versa).
                 if let Ok(entries) = std::fs::read_dir(&bin_dir) {
-                    for entry in entries.flatten() {
+                    // Collect and sort so the search is deterministic across filesystems.
+                    let mut dir_entries: Vec<_> = entries.flatten().collect();
+                    dir_entries.sort_by_key(|e| e.file_name());
+
+                    for entry in dir_entries {
                         let entry_path = entry.path();
-                        if entry_path.is_dir() {
-                            let potential_binary = entry_path.join(binary_name);
-                            if potential_binary.exists() {
-                                info!("Found llama binary at: {}", potential_binary.display());
-                                return Ok(potential_binary.to_string_lossy().to_string());
+                        if !entry_path.is_dir() {
+                            continue;
+                        }
+
+                        // Architecture guard — only relevant on macOS where both
+                        // arm64 and x64 subdirectories may coexist under MacOS/.
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        {
+                            let dir_name = entry_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("");
+                            // Skip Intel-only subdirectories on Apple Silicon.
+                            if dir_name.contains("x64") || dir_name.contains("x86_64") {
+                                debug!("Skipping Intel subdir on Apple Silicon: {}", dir_name);
+                                continue;
                             }
+                        }
+                        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+                        {
+                            let dir_name = entry_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("");
+                            // Skip ARM-only subdirectories on Intel Mac.
+                            if dir_name.contains("arm64") || dir_name.contains("aarch64") {
+                                debug!("Skipping ARM subdir on Intel Mac: {}", dir_name);
+                                continue;
+                            }
+                        }
+
+                        let potential_binary = entry_path.join(binary_name);
+                        if potential_binary.exists() {
+                            info!("Found llama binary at: {}", potential_binary.display());
+                            return Ok(potential_binary.to_string_lossy().to_string());
                         }
                     }
                 }

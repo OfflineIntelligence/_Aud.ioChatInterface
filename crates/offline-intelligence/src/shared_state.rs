@@ -346,6 +346,65 @@ impl UnifiedAppState {
             http_client,
         }
     }
+
+    /// Get API key from all sources in priority order:
+    /// 1. Database stored keys (persisted)
+    /// 2. Environment variables
+    /// 3. Config file
+    /// 
+    /// This ensures ultimate synchronicity - keys stored in DB are available
+    /// to both backend and frontend immediately after saving.
+    pub async fn get_openrouter_api_key(&self) -> Option<String> {
+        // 1. First check database (highest priority - persisted)
+        if let Ok(Some(key)) = self.shared_state.database_pool.api_keys.get_key_plaintext(&crate::memory_db::ApiKeyType::OpenRouter) {
+            if !key.is_empty() {
+                info!("Using OpenRouter API key from database");
+                return Some(key);
+            }
+        }
+        
+        // 2. Check environment variable
+        if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+            if !key.is_empty() {
+                info!("Using OpenRouter API key from environment variable");
+                return Some(key);
+            }
+        }
+        
+        // 3. Check config
+        let config = &self.shared_state.config;
+        if !config.openrouter_api_key.is_empty() {
+            info!("Using OpenRouter API key from config");
+            return Some(config.openrouter_api_key.clone());
+        }
+        
+        None
+    }
+
+    /// Get HuggingFace token from all sources in priority order:
+    /// 1. Database stored keys (persisted)
+    /// 2. Environment variables
+    /// 3. Config file
+    pub async fn get_huggingface_token(&self) -> Option<String> {
+        // 1. First check database (highest priority - persisted)
+        if let Ok(Some(token)) = self.shared_state.database_pool.api_keys.get_key_plaintext(&crate::memory_db::ApiKeyType::HuggingFace) {
+            if !token.is_empty() {
+                info!("Using HuggingFace token from database");
+                return Some(token);
+            }
+        }
+        
+        // 2. Check environment variable
+        // HUGGINGFACE_TOKEN or HF_TOKEN are common env var names
+        if let Ok(token) = std::env::var("HUGGINGFACE_TOKEN").or_else(|_| std::env::var("HF_TOKEN")) {
+            if !token.is_empty() {
+                info!("Using HuggingFace token from environment variable");
+                return Some(token);
+            }
+        }
+        
+        None
+    }
 }
 
 // Re-exports for convenience

@@ -68,7 +68,14 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
             Arc::new(db)
         }
         Err(e) => {
-            warn!("Failed to initialize memory database at {}: {}. Falling back to in-memory.", memory_db_path.display(), e);
+            // In-memory fallback means ALL user data (conversations, API key metadata,
+            // settings) is lost on every restart. This must be clearly visible.
+            error!(
+                "❌ CRITICAL: Failed to open SQLite database at {}: {}\n\
+                 Falling back to IN-MEMORY storage — all user data will be lost on exit.\n\
+                 Check that the directory is writable and no other process holds a lock on the file.",
+                memory_db_path.display(), e
+            );
             Arc::new(MemoryDatabase::new_in_memory()?)
         }
     };
@@ -92,8 +99,9 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
         Err(e) => warn!("⚠️  Failed to create model manager: {}", e),
     }
 
-    // Engine Manager (filesystem scan, usually < 1 s)
-    info!("⚙️  Initializing Engine Manager");
+    // Engine Manager - BLOCK on startup until engine is ready (like Ollama)
+    // This ensures the app is fully ready before accepting connections
+    info!("⚙️  Initializing Engine Manager (blocking until ready)...");
     match crate::engine_management::EngineManager::new() {
         Ok(engine_manager) => {
             let engine_manager_arc = Arc::new(engine_manager);
@@ -104,29 +112,42 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
                     shared_state.engine_available.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(false) => {
-                    info!("⚠️  Engine manager initialized but no engine available yet");
+                    info!("⬇️  No engine found - downloading now (blocking)...");
                     shared_state.engine_manager = Some(engine_manager_arc.clone());
                     shared_state.engine_available.store(false, std::sync::atomic::Ordering::Relaxed);
-                    // Retry in background
-                    let engine_mgr = engine_manager_arc.clone();
-                    let engine_available = shared_state.engine_available.clone();
-                    tokio::spawn(async move {
-                        let mut retry_interval = 30u64;
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(retry_interval)).await;
-                            match engine_mgr.ensure_engine_available().await {
-                                Ok(true) => {
-                                    info!("✅ Engine downloaded successfully in background");
-                                    engine_available.store(true, std::sync::atomic::Ordering::Relaxed);
+                    
+                    // BLOCK here until engine is downloaded (with timeout)
+                    let download_timeout = 300u64; // 5 minutes max
+                    let start_time = std::time::Instant::now();
+                    let check_interval = 5u64; // Check every 5 seconds
+                    
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(check_interval)).await;
+                        
+                        match engine_manager_arc.ensure_engine_available().await {
+                            Ok(true) => {
+                                info!("✅ Engine downloaded successfully!");
+                                shared_state.engine_available.store(true, std::sync::atomic::Ordering::Relaxed);
+                                break;
+                            }
+                            Ok(false) => {
+                                let elapsed = start_time.elapsed().as_secs();
+                                if elapsed >= download_timeout {
+                                    error!("❌ Engine download timed out after {} seconds", elapsed);
                                     break;
                                 }
-                                Ok(false) | Err(_) => {
-                                    warn!("Engine download retry failed, next in {}s", retry_interval);
-                                    retry_interval = (retry_interval * 2).min(300);
+                                info!("⏳ Engine download in progress... ({}s elapsed)", elapsed);
+                            }
+                            Err(e) => {
+                                let elapsed = start_time.elapsed().as_secs();
+                                if elapsed >= download_timeout {
+                                    error!("❌ Engine download failed after {} seconds: {}", elapsed, e);
+                                    break;
                                 }
+                                warn!("⚠️  Engine download retry: {}", e);
                             }
                         }
-                    });
+                    }
                 }
                 Err(e) => {
                     warn!("⚠️  Engine manager scan failed: {}", e);

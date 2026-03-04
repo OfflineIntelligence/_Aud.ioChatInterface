@@ -733,40 +733,67 @@ impl EngineRegistry {
                 });
             }
             Platform::MacOS => {
-                engines.push(EngineInfo {
-                    id: format!("llama-cpu-macos-x64-fallback-{}", latest_version),
-                    name: format!("llama.cpp CPU Engine (Fallback {})", latest_version),
-                    version: latest_version.to_string(),
-                    platform: Platform::MacOS,
-                    architecture: HardwareArchitecture::X86_64, // Fallback for older Macs
-                    acceleration: AccelerationType::CPU,
-                    download_url: format!("https://github.com/ggml-org/llama.cpp/releases/download/{}/llama-{}-bin-macos-x64.tar.gz", latest_version, latest_version),
-                    file_size: 82 * 1024 * 1024,
-                    checksum: "".to_string(),
-                    compatibility_score: 70.0,
-                    status: EngineStatus::Available,
-                    install_path: None,
-                    binary_name: "llama-server".to_string(),
-                    required_dependencies: vec![],
-                });
-                
-                // Also add Apple Silicon version
-                engines.push(EngineInfo {
-                    id: format!("llama-metal-macos-arm64-fallback-{}", latest_version),
-                    name: format!("llama.cpp Metal Engine (Apple Silicon {})", latest_version),
-                    version: latest_version.to_string(),
-                    platform: Platform::MacOS,
-                    architecture: HardwareArchitecture::Aarch64,
-                    acceleration: AccelerationType::Metal,
-                    download_url: format!("https://github.com/ggml-org/llama.cpp/releases/download/{}/llama-{}-bin-macos-arm64.tar.gz", latest_version, latest_version),
-                    file_size: 29 * 1024 * 1024,
-                    checksum: "".to_string(),
-                    compatibility_score: 85.0,
-                    status: EngineStatus::Available,
-                    install_path: None,
-                    binary_name: "llama-server".to_string(),
-                    required_dependencies: vec![],
-                });
+                // Provide architecture-correct fallbacks.
+                // Apple Silicon (Aarch64): arm64 Metal is the primary choice; arm64 CPU
+                //   is the fallback. Never offer the x64 binary — it can only run via
+                //   Rosetta 2 and performs poorly for LLM workloads.
+                // Intel (X86_64): x64 CPU is the only option (no Metal GPU acceleration).
+                match &hardware.architecture {
+                    HardwareArchitecture::Aarch64 => {
+                        engines.push(EngineInfo {
+                            id: format!("llama-metal-macos-arm64-fallback-{}", latest_version),
+                            name: format!("llama.cpp Metal (Apple Silicon) fallback ({})", latest_version),
+                            version: latest_version.to_string(),
+                            platform: Platform::MacOS,
+                            architecture: HardwareArchitecture::Aarch64,
+                            acceleration: AccelerationType::Metal,
+                            download_url: format!("https://github.com/ggml-org/llama.cpp/releases/download/{}/llama-{}-bin-macos-arm64.tar.gz", latest_version, latest_version),
+                            file_size: 29 * 1024 * 1024,
+                            checksum: "".to_string(),
+                            compatibility_score: 85.0,
+                            status: EngineStatus::Available,
+                            install_path: None,
+                            binary_name: "llama-server".to_string(),
+                            required_dependencies: vec![],
+                        });
+                        // CPU-only arm64 as secondary fallback
+                        engines.push(EngineInfo {
+                            id: format!("llama-cpu-macos-arm64-fallback-{}", latest_version),
+                            name: format!("llama.cpp CPU (Apple Silicon) fallback ({})", latest_version),
+                            version: latest_version.to_string(),
+                            platform: Platform::MacOS,
+                            architecture: HardwareArchitecture::Aarch64,
+                            acceleration: AccelerationType::CPU,
+                            download_url: format!("https://github.com/ggml-org/llama.cpp/releases/download/{}/llama-{}-bin-macos-arm64.tar.gz", latest_version, latest_version),
+                            file_size: 29 * 1024 * 1024,
+                            checksum: "".to_string(),
+                            compatibility_score: 70.0,
+                            status: EngineStatus::Available,
+                            install_path: None,
+                            binary_name: "llama-server".to_string(),
+                            required_dependencies: vec![],
+                        });
+                    }
+                    _ => {
+                        // Intel Mac (X86_64) or other — use x64 CPU binary
+                        engines.push(EngineInfo {
+                            id: format!("llama-cpu-macos-x64-fallback-{}", latest_version),
+                            name: format!("llama.cpp CPU (macOS Intel) fallback ({})", latest_version),
+                            version: latest_version.to_string(),
+                            platform: Platform::MacOS,
+                            architecture: HardwareArchitecture::X86_64,
+                            acceleration: AccelerationType::CPU,
+                            download_url: format!("https://github.com/ggml-org/llama.cpp/releases/download/{}/llama-{}-bin-macos-x64.tar.gz", latest_version, latest_version),
+                            file_size: 82 * 1024 * 1024,
+                            checksum: "".to_string(),
+                            compatibility_score: 70.0,
+                            status: EngineStatus::Available,
+                            install_path: None,
+                            binary_name: "llama-server".to_string(),
+                            required_dependencies: vec![],
+                        });
+                    }
+                }
             }
         }
         
