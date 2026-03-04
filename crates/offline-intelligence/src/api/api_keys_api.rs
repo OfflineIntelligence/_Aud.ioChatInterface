@@ -1,8 +1,8 @@
 //! API Keys Management Endpoints
 //!
 //! Provides REST endpoints for managing API keys:
-//! - Save/update HuggingFace and OpenRouter keys (stored in OS keychain)
-//! - Retrieve keys (plaintext — decrypted from keychain)
+//! - Save/update HuggingFace and OpenRouter keys (encrypted with machine-specific key, stored in SQLite)
+//! - Retrieve keys (plaintext - decrypted using machine-specific key)
 //! - Delete keys
 //! - Mark keys as used with mode tracking
 //!
@@ -73,8 +73,7 @@ fn record_to_response(record: &ApiKeyRecord, value: Option<String>) -> GetApiKey
 
 /// `POST /api-keys` — save or update an API key.
 ///
-/// The plaintext value is stored directly in the OS keychain via `ApiKeysStore::save_key`.
-/// No encryption is performed in this layer.
+/// The plaintext value is encrypted using machine-specific encryption and stored in SQLite.
 pub async fn save_api_key(
     State(state): State<UnifiedAppState>,
     Json(payload): Json<SaveApiKeyRequest>,
@@ -108,7 +107,7 @@ pub async fn get_api_key(
     let key_type_str = params.get("key_type").ok_or(StatusCode::BAD_REQUEST)?;
     let key_type = ApiKeyType::from_str(key_type_str).ok_or(StatusCode::BAD_REQUEST)?;
 
-    // Get plaintext from keychain (triggers migration if the entry is still XOR-encrypted).
+    // Get plaintext (decrypts using machine-specific key).
     let value = state
         .shared_state
         .database_pool
@@ -156,7 +155,7 @@ pub async fn get_all_api_keys(
         Ok(entries) => {
             let keys: Vec<GetApiKeyResponse> = entries
                 .into_iter()
-                .map(|(record, value)| record_to_response(&record, value))
+                .map(|(record, value)| record_to_response(&record, Some(value)))
                 .collect();
             Ok(Json(GetAllApiKeysResponse { keys }))
         }
@@ -167,7 +166,7 @@ pub async fn get_all_api_keys(
     }
 }
 
-/// `DELETE /api-keys?key_type=<type>` — delete an API key from keychain + DB.
+/// `DELETE /api-keys?key_type=<type>` — delete an API key from storage.
 pub async fn delete_api_key(
     State(state): State<UnifiedAppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,

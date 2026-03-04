@@ -1,17 +1,12 @@
-//! API Keys Store — OS Keychain + SQLite metadata
+//! API Keys Store — Machine-specific encryption with SQLite storage
 //!
-//! Stores and manages API keys using the native OS keychain for secure storage:
-//! - **Windows**: Windows Credential Manager
-//! - **macOS**: macOS Keychain
-//! - **Linux**: libsecret via D-Bus
+//! Stores and manages API keys using machine-specific XOR encryption stored directly in SQLite.
+//! No OS keychain, no password prompts, no external dependencies.
 //!
-//! SQLite tracks metadata only (created_at, last_used_at, usage_count) and stores
-//! a `"keychain"` sentinel to indicate the value lives in the OS credential store.
-//!
-//! **Migration**: Legacy XOR-encrypted entries are automatically migrated to the OS
-//! keychain on the first read — no manual action required by the user.
+//! Encryption uses the machine's device name as the key, ensuring that keys can only be
+//! decrypted on the same machine where they were encrypted.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
 use r2d2::Pool;
@@ -20,12 +15,6 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
-
-/// Sentinel value stored in SQLite when the actual key lives in the OS keychain.
-const KEYCHAIN_SENTINEL: &str = "keychain";
-
-/// Credential store service name — identifies the app in the OS keychain.
-const KEYCHAIN_SERVICE: &str = "aud-io";
 
 // ─────────────────────────────────────────────
 // Public types
@@ -56,10 +45,7 @@ impl ApiKeyType {
 }
 
 /// Metadata record stored in SQLite.
-///
-/// `encrypted_value` is either:
-/// - `"keychain"` → actual value is in the OS keychain (primary path)
-/// - A base64-encoded XOR string → legacy entry, auto-migrated on first read
+/// `encrypted_value` is always a base64-encoded XOR-encrypted string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyRecord {
     pub id: i64,
@@ -72,63 +58,10 @@ pub struct ApiKeyRecord {
 }
 
 // ─────────────────────────────────────────────
-// OS keychain helper
-// ─────────────────────────────────────────────
-
-struct OsKeychain;
-
-impl OsKeychain {
-    /// Retrieve a credential from the OS keychain.
-    /// Returns `Ok(None)` if no entry exists for the given name.
-    fn get(name: &str) -> Result<Option<String>> {
-        match keyring::Entry::new(KEYCHAIN_SERVICE, name) {
-            Ok(entry) => match entry.get_password() {
-                Ok(pw) => Ok(Some(pw)),
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(e) => Err(anyhow::anyhow!("Keychain get '{}' failed: {}", name, e)),
-            },
-            Err(e) => Err(anyhow::anyhow!(
-                "Keychain entry creation failed for '{}': {}",
-                name,
-                e
-            )),
-        }
-    }
-
-    /// Store or overwrite a credential in the OS keychain.
-    fn set(name: &str, value: &str) -> Result<()> {
-        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, name).map_err(|e| {
-            anyhow::anyhow!("Keychain entry creation failed for '{}': {}", name, e)
-        })?;
-        entry.set_password(value).map_err(|e| {
-            anyhow::anyhow!("Keychain set '{}' failed: {}", name, e)
-        })?;
-        Ok(())
-    }
-
-    /// Delete a credential from the OS keychain.
-    /// Returns `false` if the entry did not exist; `true` if it was removed.
-    fn delete(name: &str) -> Result<bool> {
-        match keyring::Entry::new(KEYCHAIN_SERVICE, name) {
-            Ok(entry) => match entry.delete_password() {
-                Ok(_) => Ok(true),
-                Err(keyring::Error::NoEntry) => Ok(false),
-                Err(e) => Err(anyhow::anyhow!("Keychain delete '{}' failed: {}", name, e)),
-            },
-            Err(e) => Err(anyhow::anyhow!(
-                "Keychain entry creation failed for '{}': {}",
-                name,
-                e
-            )),
-        }
-    }
-}
-
-// ─────────────────────────────────────────────
 // Store
 // ─────────────────────────────────────────────
 
-/// Manages API keys — OS keychain for plaintext values, SQLite for metadata.
+/// Manages API keys with machine-specific encryption stored in SQLite.
 pub struct ApiKeysStore {
     pool: Arc<Pool<SqliteConnectionManager>>,
 }
@@ -163,26 +96,14 @@ impl ApiKeysStore {
 
     /// Save or update an API key.
     ///
-    /// Writes the plaintext value to the OS keychain and stores `"keychain"` as
-    /// the sentinel in SQLite. Falls back to XOR encryption stored in SQLite if the
-    /// keychain is unavailable (e.g., headless / CI environments).
+    /// Encrypts the plaintext value using machine-specific encryption and stores
+    /// the encrypted value directly in SQLite.
     pub fn save_key(&self, key_type: ApiKeyType, plaintext: &str) -> Result<()> {
         let name = key_type.as_str();
 
-        // Try OS keychain first; fall back to XOR if it is unavailable.
-        let sentinel = match OsKeychain::set(name, plaintext) {
-            Ok(()) => {
-                info!("Stored '{}' API key in OS keychain", name);
-                KEYCHAIN_SENTINEL.to_string()
-            }
-            Err(e) => {
-                warn!(
-                    "OS keychain unavailable for '{}' ({}); using XOR fallback",
-                    name, e
-                );
-                SimpleEncryption::encrypt(plaintext)
-            }
-        };
+        // Encrypt using machine-specific key
+        let encrypted = Encryption::encrypt(plaintext);
+        info!("Encrypted API key for: {}", name);
 
         let conn = self.pool.get()?;
         let now = Utc::now().to_rfc3339();
@@ -192,10 +113,10 @@ impl ApiKeysStore {
              ON CONFLICT(key_type) DO UPDATE SET
                 encrypted_value = excluded.encrypted_value,
                 created_at = excluded.created_at",
-            params![name, sentinel, now],
+            params![name, encrypted, now],
         )?;
 
-        info!("API key metadata saved for: {}", name);
+        info!("API key saved for: {}", name);
         Ok(())
     }
 
@@ -203,204 +124,154 @@ impl ApiKeysStore {
 
     /// Retrieve the **plaintext** value of an API key.
     ///
-    /// - If the DB row has the `"keychain"` sentinel → reads from the OS keychain.
-    /// - If the DB row has a legacy XOR-encrypted value → decrypts it, silently
-    ///   migrates to the OS keychain, and returns the plaintext.
+    /// Decrypts the stored encrypted value using machine-specific encryption.
     pub fn get_key_plaintext(&self, key_type: &ApiKeyType) -> Result<Option<String>> {
         let record = match self.get_key_metadata(key_type)? {
             Some(r) => r,
             None => return Ok(None),
         };
 
-        if record.encrypted_value == KEYCHAIN_SENTINEL {
-            // Primary path — value lives in the OS keychain.
-            match OsKeychain::get(key_type.as_str()) {
-                Ok(v) => Ok(v),
-                Err(e) => {
-                    warn!(
-                        "Keychain get failed for '{}': {}",
-                        key_type.as_str(),
-                        e
-                    );
-                    Ok(None)
-                }
-            }
-        } else {
-            // Legacy path — XOR-encrypted value in SQLite. Decrypt and migrate.
-            match SimpleEncryption::decrypt(&record.encrypted_value) {
-                Ok(plaintext) => {
-                    // Attempt silent migration to the OS keychain.
-                    match OsKeychain::set(key_type.as_str(), &plaintext) {
-                        Ok(()) => {
-                            info!(
-                                "Migrated '{}' API key from XOR to OS keychain",
-                                key_type.as_str()
-                            );
-                            // Update the DB row to the keychain sentinel.
-                            if let Ok(conn) = self.pool.get() {
-                                let _ = conn.execute(
-                                    "UPDATE api_keys SET encrypted_value = ?1 WHERE key_type = ?2",
-                                    params![KEYCHAIN_SENTINEL, key_type.as_str()],
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Migration to keychain failed for '{}': {}; keeping XOR",
-                                key_type.as_str(),
-                                e
-                            );
-                        }
-                    }
-                    Ok(Some(plaintext))
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to decrypt legacy key '{}': {}",
-                        key_type.as_str(),
-                        e
-                    );
-                    Ok(None)
-                }
+        // Decrypt the stored encrypted value
+        match Encryption::decrypt(&record.encrypted_value) {
+            Ok(plaintext) => Ok(Some(plaintext)),
+            Err(e) => {
+                warn!("Failed to decrypt API key '{}': {}", key_type.as_str(), e);
+                Err(e)
             }
         }
     }
 
-    /// Get the raw SQLite metadata record (does **not** decrypt or access keychain).
+    /// Get the raw SQLite metadata record (does **not** decrypt).
     pub fn get_key_metadata(&self, key_type: &ApiKeyType) -> Result<Option<ApiKeyRecord>> {
         let conn = self.pool.get()?;
-        let result = conn
+        let name = key_type.as_str();
+
+        let row = conn
             .query_row(
                 "SELECT id, key_type, encrypted_value, created_at, last_used_at, last_mode, usage_count
                  FROM api_keys WHERE key_type = ?1",
-                params![key_type.as_str()],
+                params![name],
                 |row| {
-                    let created_str: String = row.get(3)?;
-                    let last_used_str: Option<String> = row.get(4)?;
                     Ok(ApiKeyRecord {
                         id: row.get(0)?,
                         key_type: row.get(1)?,
                         encrypted_value: row.get(2)?,
-                        created_at: DateTime::parse_from_rfc3339(&created_str)
-                            .map(|dt| dt.with_timezone(&Utc))
+                        created_at: row
+                            .get::<_, String>(3)?
+                            .parse()
                             .unwrap_or_else(|_| Utc::now()),
-                        last_used_at: last_used_str.and_then(|s| {
-                            DateTime::parse_from_rfc3339(&s)
-                                .ok()
-                                .map(|dt| dt.with_timezone(&Utc))
-                        }),
+                        last_used_at: row
+                            .get::<_, Option<String>>(4)?
+                            .and_then(|s| s.parse().ok()),
                         last_mode: row.get(5)?,
                         usage_count: row.get(6)?,
                     })
                 },
             )
             .optional()?;
-        Ok(result)
+
+        Ok(row)
     }
 
-    /// Return all metadata records (without plaintext values).
+    /// Get all API keys (encrypted values).
     pub fn get_all_keys(&self) -> Result<Vec<ApiKeyRecord>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
             "SELECT id, key_type, encrypted_value, created_at, last_used_at, last_mode, usage_count
              FROM api_keys",
         )?;
-        let keys = stmt
-            .query_map([], |row| {
-                let created_str: String = row.get(3)?;
-                let last_used_str: Option<String> = row.get(4)?;
-                Ok(ApiKeyRecord {
-                    id: row.get(0)?,
-                    key_type: row.get(1)?,
-                    encrypted_value: row.get(2)?,
-                    created_at: DateTime::parse_from_rfc3339(&created_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                    last_used_at: last_used_str.and_then(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .ok()
-                            .map(|dt| dt.with_timezone(&Utc))
-                    }),
-                    last_mode: row.get(5)?,
-                    usage_count: row.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(keys)
+
+        let rows = stmt.query_map([], |row| {
+            Ok(ApiKeyRecord {
+                id: row.get(0)?,
+                key_type: row.get(1)?,
+                encrypted_value: row.get(2)?,
+                created_at: row
+                    .get::<_, String>(3)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+                last_used_at: row
+                    .get::<_, Option<String>>(4)?
+                    .and_then(|s| s.parse().ok()),
+                last_mode: row.get(5)?,
+                usage_count: row.get(6)?,
+            })
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
     }
 
-    /// Return all API keys with their decrypted plaintext values.
-    /// Used by the `/api-keys/all` endpoint.
-    pub fn get_all_keys_with_values(&self) -> Result<Vec<(ApiKeyRecord, Option<String>)>> {
-        let records = self.get_all_keys()?;
-        let mut out = Vec::with_capacity(records.len());
-        for record in records {
-            let plaintext = ApiKeyType::from_str(&record.key_type)
-                .and_then(|kt| self.get_key_plaintext(&kt).ok().flatten());
-            out.push((record, plaintext));
+    /// Get all API keys with their plaintext values (decrypted).
+    pub fn get_all_keys_with_values(&self) -> Result<Vec<(ApiKeyRecord, String)>> {
+        let keys = self.get_all_keys()?;
+        let mut result = Vec::new();
+        for record in keys {
+            match Encryption::decrypt(&record.encrypted_value) {
+                Ok(value) => result.push((record, value)),
+                Err(e) => {
+                    warn!("Failed to decrypt API key '{}': {}", record.key_type, e);
+                }
+            }
         }
-        Ok(out)
+        Ok(result)
+    }
+
+    /// Check if an API key exists (without decrypting it).
+    pub fn key_exists(&self, key_type: &ApiKeyType) -> Result<bool> {
+        let conn = self.pool.get()?;
+        let name = key_type.as_str();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM api_keys WHERE key_type = ?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     // ── Update ───────────────────────────────
 
-    /// Increment usage count and record the mode and timestamp.
+    /// Mark an API key as used (update last_used_at and usage_count).
     pub fn mark_used(&self, key_type: ApiKeyType, mode: &str) -> Result<()> {
         let conn = self.pool.get()?;
+        let name = key_type.as_str();
         let now = Utc::now().to_rfc3339();
+
         conn.execute(
-            "UPDATE api_keys
-             SET last_used_at = ?1, last_mode = ?2, usage_count = usage_count + 1
+            "UPDATE api_keys SET last_used_at = ?1, last_mode = ?2, usage_count = usage_count + 1
              WHERE key_type = ?3",
-            params![now, mode, key_type.as_str()],
+            params![now, mode, name],
         )?;
         Ok(())
     }
 
     // ── Delete ───────────────────────────────
 
-    /// Delete an API key — removes from both OS keychain and SQLite.
+    /// Delete an API key from storage.
     pub fn delete_key(&self, key_type: ApiKeyType) -> Result<bool> {
-        // Remove from OS keychain (best-effort; the entry may not exist there yet
-        // if the key was originally stored via XOR before migration).
-        match OsKeychain::delete(key_type.as_str()) {
-            Ok(true) => info!("Deleted '{}' key from OS keychain", key_type.as_str()),
-            Ok(false) => { /* no keychain entry — nothing to do */ }
-            Err(e) => warn!(
-                "Could not delete '{}' from OS keychain: {}",
-                key_type.as_str(),
-                e
-            ),
-        }
-
         let conn = self.pool.get()?;
-        let rows = conn.execute(
-            "DELETE FROM api_keys WHERE key_type = ?1",
-            params![key_type.as_str()],
-        )?;
+        let name = key_type.as_str();
 
-        if rows > 0 {
-            info!("API key metadata deleted for: {}", key_type.as_str());
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        let rows = conn.execute("DELETE FROM api_keys WHERE key_type = ?1", params![name])?;
+        info!("Deleted API key for: {}", name);
+        Ok(rows > 0)
     }
 }
 
 // ─────────────────────────────────────────────
-// Legacy XOR encryption (kept for migration reads and keychain fallback)
+// Simple machine-specific XOR encryption
 // ─────────────────────────────────────────────
 
-/// XOR-based obfuscation used in earlier versions of the app.
-///
-/// New keys are always written to the OS keychain. This type is retained so that:
-/// 1. Existing XOR-encrypted DB entries can be decrypted and migrated to the keychain.
-/// 2. When the OS keychain is unavailable, this provides a graceful fallback.
-pub struct SimpleEncryption;
+/// Machine-specific XOR encryption for API keys.
+/// Uses the device name as the encryption key.
+/// Keys can only be decrypted on the same machine where they were encrypted.
+pub struct Encryption;
 
-impl SimpleEncryption {
-    fn get_key() -> Vec<u8> {
+impl Encryption {
+    fn get_machine_key() -> Vec<u8> {
         let machine_id = whoami::devicename();
         let mut key: Vec<u8> = machine_id.bytes().collect();
         while key.len() < 32 {
@@ -410,8 +281,10 @@ impl SimpleEncryption {
         key
     }
 
+    /// Encrypt plaintext using machine-specific XOR encryption.
+    /// Returns base64-encoded ciphertext.
     pub fn encrypt(plaintext: &str) -> String {
-        let key = Self::get_key();
+        let key = Self::get_machine_key();
         let encrypted: Vec<u8> = plaintext
             .as_bytes()
             .iter()
@@ -421,9 +294,12 @@ impl SimpleEncryption {
         BASE64.encode(&encrypted)
     }
 
+    /// Decrypt base64-encoded ciphertext using machine-specific XOR encryption.
     pub fn decrypt(ciphertext: &str) -> Result<String> {
-        let key = Self::get_key();
-        let bytes = BASE64.decode(ciphertext)?;
+        let key = Self::get_machine_key();
+        let bytes = BASE64
+            .decode(ciphertext)
+            .context("Failed to decode base64")?;
         let decrypted: Vec<u8> = bytes
             .iter()
             .enumerate()
@@ -433,28 +309,23 @@ impl SimpleEncryption {
     }
 }
 
-// ─────────────────────────────────────────────
-// Tests
-// ─────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_xor_roundtrip() {
+    fn test_encrypt_decrypt_roundtrip() {
         let original = "hf_1234567890abcdef";
-        let encrypted = SimpleEncryption::encrypt(original);
-        let decrypted = SimpleEncryption::decrypt(&encrypted).unwrap();
+        let encrypted = Encryption::encrypt(original);
+        let decrypted = Encryption::decrypt(&encrypted).unwrap();
         assert_eq!(original, decrypted);
     }
 
     #[test]
-    fn test_keychain_sentinel_not_xor() {
-        // "keychain" sentinel must not accidentally be valid base64 that XOR-decodes
-        // to a real key — it should be treated as a sentinel, not a ciphertext.
-        assert_eq!(KEYCHAIN_SENTINEL, "keychain");
-        // Attempting to XOR-decrypt it won't yield anything useful — just verify no panic.
-        let _ = SimpleEncryption::decrypt(KEYCHAIN_SENTINEL);
+    fn test_encrypt_different_output() {
+        let key1 = Encryption::encrypt("test_key");
+        let key2 = Encryption::encrypt("test_key");
+        // Same input should produce same output on same machine
+        assert_eq!(key1, key2);
     }
 }

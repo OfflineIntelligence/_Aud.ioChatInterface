@@ -19,7 +19,7 @@ pub use summary_store::SummaryStore;
 pub use embedding_store::{EmbeddingStore, EmbeddingStats};
 pub use local_files_store::{LocalFilesStore, LocalFile, LocalFileTree};
 pub use all_files_store::{AllFilesStore, AllFile, AllFileTree};
-pub use api_keys_store::{ApiKeysStore, ApiKeyType, ApiKeyRecord};
+pub use api_keys_store::{ApiKeysStore, ApiKeyType, ApiKeyRecord, Encryption};
 pub use users_store::{UsersStore, User};
 
 use std::path::Path;

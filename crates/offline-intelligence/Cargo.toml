@@ -68,8 +68,6 @@ walkdir = "2.4"
 fs2 = "0.4"
 tempfile = "3.8"
 whoami = "1.5"
-# OS keychain (Windows Credential Manager / macOS Keychain / libsecret)
-keyring = "2"
 # File processing dependencies - using simpler alternatives to avoid conflicts
 base64 = "0.22"
 mime_guess = "2.0"
