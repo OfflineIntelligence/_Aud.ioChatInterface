@@ -156,28 +156,11 @@ pub async fn list_models(
     let model_manager = state.shared_state.model_manager.as_ref()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Return ALL models regardless of API key presence
+    // Users should see available models before adding API keys
     let models = get_cloned_models(model_manager).await;
 
-    let has_openrouter_key = has_verified_key(&state, ApiKeyType::OpenRouter).await;
-    let has_huggingface_key = has_verified_key(&state, ApiKeyType::HuggingFace).await;
-
-    let filtered_models: Vec<ModelInfo> = models
-        .into_iter()
-        .filter(|m| {
-            let source = m.download_source.as_deref().unwrap_or("");
-            match source {
-                "openrouter" => {
-                    m.status == ModelStatus::Installed || has_openrouter_key
-                }
-                "huggingface" => {
-                    m.status == ModelStatus::Installed || has_huggingface_key
-                }
-                _ => true,
-            }
-        })
-        .collect();
-
-    Ok(Json(filtered_models))
+    Ok(Json(models))
 }
 
 /// Get models filtered by mode (online/offline)
@@ -194,52 +177,39 @@ pub async fn list_models_by_mode(
 
     let all_models = get_cloned_models(model_manager).await;
 
-    // Check for verified keys
+    // Check for verified keys (for display purposes - show all models regardless)
     let has_openrouter_key = has_verified_key(&state, ApiKeyType::OpenRouter).await;
     let has_huggingface_key = has_verified_key(&state, ApiKeyType::HuggingFace).await;
 
     match mode {
         "online" => {
-            // Check if OpenRouter key is available
-            if !has_openrouter_key {
-                return Ok(Json(Vec::<ModelInfo>::new()));
-            }
-
-            // Big tech providers to prioritize for OpenRouter free models
-            let big_tech_providers = vec![
-                "openai",      // OpenAI
-                "google",      // Google Gemini
-                "meta-llama",  // Meta Llama
-                "anthropic",   // Claude
-                "deepseek",    // DeepSeek
-                "moonshot",    // Kimi (Moonshot AI)
-                "nvidia",      // NVIDIA
-                "microsoft",   // Microsoft
-                "amd",         // AMD
+            // Show filtered models (free, context > 16k from premium providers)
+            // API key is only required when actually using the model for chat, not for viewing
+            let premium_providers = vec![
+                "openai",       // GPT-4, GPT-4o, GPT-4 Turbo
+                "google",       // Gemini
+                "anthropic",    // Claude
+                "deepseek",     // DeepSeek
+                "moonshot",    // Kimi
+                "qwen",        // Qwen
                 "zhipuai",     // GLM/智谱AI
+                "minimax",     // Minimax
+                "microsoft",   // Phi, Copilot
+                "meta-llama",  // Llama
+                "mistral",     // Mistral
+                "cohere",      // Command R
+                "sarvam",     // Sarvam AI
+                "x-ai",       // Grok
+                "nvidia",     // Nvidia
+                "amazon",     // Claude on Bedrock
+                "replicate",  // Various models
             ];
 
-            // Known free/zero-credit model patterns on OpenRouter
-            let free_model_patterns = vec![
-                "free",
-                "free:", 
-                "gemini-flash",
-                "gemini-pro",
-                "llama-3.1",
-                "llama-3.2",
-                "llama-3.3",
-                "llama-4",
-                "mistral",
-                "mixtral",
-                "phi",
-                "gemma",
-                "qwen",
-                "command-r",
-                "deepseek-chat",
-                "deepseek-coder",
-            ];
+            // Context length thresholds (in tokens)
+            const MIN_PREMIUM_CTX: u64 = 32000;  // 32k minimum for premium
+            const MIN_STANDARD_CTX: u64 = 16000; // 16k minimum for standard
 
-            // Filter OpenRouter models: big tech providers + free models
+            // Filter OpenRouter models: premium providers + good context length
             let or_models: Vec<ModelInfo> = all_models
                 .into_iter()
                 .filter(|m| {
@@ -248,28 +218,39 @@ pub async fn list_models_by_mode(
                     }
                     let id_lower = m.id.to_lowercase();
                     
-                    // Check if it's from a big tech provider
-                    let is_big_tech = big_tech_providers.iter().any(|p| id_lower.contains(p));
+                    // Check if it's from a premium provider
+                    let is_premium = premium_providers.iter().any(|p| id_lower.contains(p));
                     
-                    // Check if it's a free model
-                    let is_free = free_model_patterns.iter().any(|p| id_lower.contains(p));
+                    // Check context length
+                    let ctx_len = m.context_length.unwrap_or(0);
+                    let has_good_ctx = ctx_len >= MIN_STANDARD_CTX;
                     
-                    is_big_tech || is_free
+                    // Include if premium provider OR has good context length
+                    is_premium || has_good_ctx
                 })
                 .collect();
 
-            // Sort: big tech first, then others
+            // Sort: Premium providers first (by context length), then by provider name
             let mut sorted_models: Vec<ModelInfo> = or_models;
             sorted_models.sort_by(|a, b| {
                 let a_lower = a.id.to_lowercase();
                 let b_lower = b.id.to_lowercase();
-                let a_is_big = big_tech_providers.iter().any(|p| a_lower.contains(p));
-                let b_is_big = big_tech_providers.iter().any(|p| b_lower.contains(p));
                 
-                match (a_is_big, b_is_big) {
+                // Check premium status
+                let a_is_premium = premium_providers.iter().any(|p| a_lower.contains(p));
+                let b_is_premium = premium_providers.iter().any(|p| b_lower.contains(p));
+                
+                // Get context lengths (default to 0 if not set)
+                let a_ctx = a.context_length.unwrap_or(0);
+                let b_ctx = b.context_length.unwrap_or(0);
+                
+                match (a_is_premium, b_is_premium) {
                     (true, false) => std::cmp::Ordering::Less,
                     (false, true) => std::cmp::Ordering::Greater,
-                    _ => std::cmp::Ordering::Equal,
+                    _ => {
+                        // Both are premium - sort by context length (higher first)
+                        b_ctx.cmp(&a_ctx)
+                    }
                 }
             });
 
@@ -295,12 +276,9 @@ pub async fn list_models_by_mode(
             Ok(Json(sorted_models))
         }
         "offline" => {
-            // Check if HuggingFace key is available
-            if !has_huggingface_key {
-                return Ok(Json(Vec::<ModelInfo>::new()));
-            }
-
-            // Big tech authors for HuggingFace
+            // Show ALL HuggingFace models (not just installed ones)
+            // API key is only required when downloading gated/private models, not for viewing
+            // Prioritize big tech authors at top
             let big_tech_authors = vec![
                 "google",
                 "meta",
@@ -553,6 +531,8 @@ pub async fn install_model(
         total_shards: None,
         shard_filenames: vec![],
         downloads: 0,
+        is_gated: false,
+        pricing: None,
     };
 
     // Convert source specifier to download source
@@ -1171,8 +1151,11 @@ pub async fn switch_model(
         Err(e) => {
             let error_msg = e.to_string();
 
-            // Check if error is due to missing engine binary
-            if error_msg.contains("binary not found") || error_msg.contains("not found at") || error_msg.contains("No such file") {
+            // Check if the error is due to a missing binary
+            if error_msg.contains("binary not found")
+                || error_msg.contains("not found at")
+                || error_msg.contains("No such file")
+            {
                 error!("Engine binary not found - attempting automatic download and retry");
 
                 // Attempt to download engine automatically
@@ -1548,11 +1531,284 @@ fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut size = bytes as f64;
     let mut unit_index = 0;
-    
+
     while size >= 1024.0 && unit_index < UNITS.len() - 1 {
         size /= 1024.0;
         unit_index += 1;
     }
-    
+
     format!("{:.2} {}", size, UNITS[unit_index])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase A: HuggingFace Gated Model Access Check
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Query parameters for the HF access-check endpoint
+#[derive(Debug, Deserialize)]
+pub struct HfAccessParams {
+    pub repo_id: String,
+    pub filename: String,
+    pub hf_token: Option<String>,
+}
+
+/// Response body for the HF access-check endpoint
+#[derive(Debug, Serialize)]
+pub struct HfAccessResponse {
+    /// One of: "accessible", "not_approved", "unauthorized", "not_found", "error"
+    pub status: String,
+    /// `true` when the user may start a download immediately
+    pub can_download: bool,
+    /// Human-readable explanation
+    pub message: String,
+}
+
+/// `GET /models/hf/access?repo_id=…&filename=…&hf_token=…`
+///
+/// Performs a HEAD request against the HuggingFace CDN to determine whether
+/// the supplied token grants download access to a gated repository.
+pub async fn check_hf_access(
+    Query(params): Query<HfAccessParams>,
+) -> Result<impl IntoResponse, StatusCode> {
+    use crate::model_management::{check_hf_gated_access, HfAccessStatus};
+
+    let status = check_hf_gated_access(
+        &params.repo_id,
+        &params.filename,
+        params.hf_token.as_deref(),
+    )
+    .await;
+
+    let (status_str, can_download, message) = match &status {
+        HfAccessStatus::Accessible => (
+            "accessible",
+            true,
+            "Access granted — download can proceed.".to_string(),
+        ),
+        HfAccessStatus::NotApproved => (
+            "not_approved",
+            false,
+            "Your token is valid but you have not been approved to access this \
+             model yet. Visit the model page on HuggingFace to request access."
+                .to_string(),
+        ),
+        HfAccessStatus::Unauthorized => (
+            "unauthorized",
+            false,
+            "No HuggingFace token provided or the token is invalid. \
+             Please add your HF token in Settings."
+                .to_string(),
+        ),
+        HfAccessStatus::NotFound => (
+            "not_found",
+            false,
+            "The model or file was not found on HuggingFace.".to_string(),
+        ),
+        HfAccessStatus::Error(e) => (
+            "error",
+            false,
+            format!("Network or server error: {}", e),
+        ),
+    };
+
+    Ok(Json(HfAccessResponse {
+        status: status_str.to_string(),
+        can_download,
+        message,
+    }))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase B: OpenRouter Full Catalog (paginated + filtered)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Query parameters for the OpenRouter catalog endpoint
+#[derive(Debug, Deserialize)]
+pub struct OpenRouterCatalogParams {
+    /// 1-based page number (default: 1)
+    pub page: Option<usize>,
+    /// Results per page, clamped to [1, 200] (default: 50)
+    pub per_page: Option<usize>,
+    /// Free-text search across name, id, description, and provider
+    pub search: Option<String>,
+    /// Filter by provider prefix, e.g. "openai", "meta", "google"
+    pub provider: Option<String>,
+    /// When `true`, only return models with zero-cost pricing
+    pub free_only: Option<bool>,
+    /// Minimum context-length in tokens, e.g. 32000
+    pub min_context: Option<u64>,
+}
+
+/// Paginated response for the OpenRouter catalog
+#[derive(Debug, Serialize)]
+pub struct OpenRouterCatalogResponse {
+    pub models: Vec<ModelInfo>,
+    pub total: usize,
+    pub page: usize,
+    pub per_page: usize,
+    pub total_pages: usize,
+}
+
+/// `GET /models/openrouter/catalog`
+///
+/// Returns the full set of OpenRouter models stored in the registry,
+/// with optional server-side filtering and pagination.
+pub async fn openrouter_catalog(
+    State(state): State<UnifiedAppState>,
+    Query(params): Query<OpenRouterCatalogParams>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let model_manager = state
+        .shared_state
+        .model_manager
+        .as_ref()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let page = params.page.unwrap_or(1).max(1);
+    let per_page = params.per_page.unwrap_or(50).clamp(1, 200);
+
+    // Collect all OpenRouter models from the registry
+    let mut models: Vec<ModelInfo> = {
+        let registry = model_manager.registry.read().await;
+        registry
+            .list_models()
+            .into_iter()
+            .filter(|m| m.download_source.as_deref() == Some("openrouter"))
+            .cloned()
+            .collect()
+    };
+
+    // ── Filters ────────────────────────────────────────────────────────────
+    if let Some(ref search) = params.search {
+        let q = search.to_lowercase();
+        models.retain(|m| {
+            m.name.to_lowercase().contains(&q)
+                || m.id.to_lowercase().contains(&q)
+                || m.description
+                    .as_ref()
+                    .map_or(false, |d| d.to_lowercase().contains(&q))
+                || m.provider
+                    .as_ref()
+                    .map_or(false, |p| p.to_lowercase().contains(&q))
+        });
+    }
+
+    if let Some(ref provider) = params.provider {
+        let prov = provider.to_lowercase();
+        models.retain(|m| {
+            m.provider
+                .as_ref()
+                .map_or(false, |p| p.to_lowercase().contains(&prov))
+                || m.id.to_lowercase().starts_with(&prov)
+        });
+    }
+
+    if params.free_only.unwrap_or(false) {
+        models.retain(|m| {
+            m.pricing.as_ref().map_or(false, |p| p.is_free())
+                || m.tags.iter().any(|t| t == "free")
+        });
+    }
+
+    if let Some(min_ctx) = params.min_context {
+        models.retain(|m| m.context_length.map_or(false, |ctx| ctx >= min_ctx));
+    }
+
+    // Sort by name for stable ordering
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let total = models.len();
+    let total_pages = total.div_ceil(per_page);
+    let start = (page - 1) * per_page;
+    let page_models: Vec<ModelInfo> = models.into_iter().skip(start).take(per_page).collect();
+
+    Ok(Json(OpenRouterCatalogResponse {
+        models: page_models,
+        total,
+        page,
+        per_page,
+        total_pages,
+    }))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase B: OpenRouter Account Quota
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Response body for the OpenRouter quota endpoint
+#[derive(Debug, Serialize)]
+pub struct OpenRouterQuotaResponse {
+    /// Total credits spent so far in USD
+    pub usage_usd: f64,
+    /// Hard spending cap in USD (`null` = unlimited)
+    pub limit_usd: Option<f64>,
+    /// `true` when the account is on the free tier
+    pub is_free_tier: bool,
+    /// Remaining credits in USD (`null` when limit is unlimited)
+    pub remaining_usd: Option<f64>,
+}
+
+/// `GET /models/openrouter/quota`
+///
+/// Queries `https://openrouter.ai/api/v1/auth/key` with the stored API key
+/// and returns the current usage / limit information.
+pub async fn openrouter_quota(
+    State(state): State<UnifiedAppState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Retrieve stored OpenRouter key
+    let api_key = state
+        .shared_state
+        .database_pool
+        .api_keys
+        .get_key_plaintext(&ApiKeyType::OpenRouter)
+        .ok()
+        .flatten()
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let resp = client
+        .get("https://openrouter.ai/api/v1/auth/key")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| {
+            warn!("OpenRouter quota request failed: {}", e);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    if !resp.status().is_success() {
+        warn!("OpenRouter /auth/key returned {}", resp.status());
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OrKeyData {
+        usage: Option<f64>,
+        limit: Option<f64>,
+        is_free_tier: Option<bool>,
+    }
+    #[derive(serde::Deserialize)]
+    struct OrKeyResp {
+        data: OrKeyData,
+    }
+
+    let body: OrKeyResp = resp.json().await.map_err(|e| {
+        warn!("Failed to parse OpenRouter quota response: {}", e);
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    let usage = body.data.usage.unwrap_or(0.0);
+    let limit = body.data.limit;
+    let is_free_tier = body.data.is_free_tier.unwrap_or(false);
+    let remaining = limit.map(|l| (l - usage).max(0.0));
+
+    Ok(Json(OpenRouterQuotaResponse {
+        usage_usd: usage,
+        limit_usd: limit,
+        is_free_tier,
+        remaining_usd: remaining,
+    }))
 }

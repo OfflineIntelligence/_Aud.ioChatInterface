@@ -22,7 +22,7 @@ use std::sync::Arc;
 use crate::memory::Message;
 use crate::memory_db::schema::Embedding;
 use crate::shared_state::UnifiedAppState;
-use crate::utils::{extract_content_from_bytes, estimate_tokens, truncate_to_budget};
+use crate::utils::{extract_content_from_bytes, estimate_tokens, truncate_to_budget, is_extraction_sentinel};
 use regex::Regex;
 
 lazy_static::lazy_static! {
@@ -88,16 +88,6 @@ fn default_stream() -> bool { true }
 /// Prevents context window overflow for both local LLM and OpenRouter modes.
 const MAX_ATTACHMENT_TOKENS: usize = 64_000;
 
-/// Returns true when `file_processor` returned a sentinel error string instead of
-/// real content. Sentinels always start with `[` and describe a failure.
-fn is_extraction_sentinel(s: &str) -> bool {
-    s.starts_with("[Could not")
-        || s.starts_with("[PDF")
-        || s.starts_with("[DOCX")
-        || s.starts_with("[Spreadsheet")
-        || s.starts_with("[Presentation")
-        || s.starts_with("[ODT")
-}
 
 /// Extract text from a single attachment. Returns an error string suitable for
 /// display to the user if anything goes wrong — no silent fallbacks.
@@ -434,11 +424,19 @@ pub async fn generate_stream(
                 let cache_key = crate::api::attachment_api::attachment_cache_key(attach);
                 if let Some((_, cached)) = state.shared_state.attachment_cache.remove(&cache_key) {
                     if !cached.is_stale(crate::api::attachment_api::CACHE_TTL_SECS) {
-                        info!("Attachment cache hit for '{}' — skipping extraction", attach.name);
-                        extracted.push((attach.name.clone(), cached.text));
-                        continue;
+                        // Guard: preprocess may have cached a sentinel if extraction failed.
+                        // Treat the cached sentinel as a cache miss so try_extract_attachment
+                        // runs and surfaces a proper user-facing error via HTTP 422.
+                        if is_extraction_sentinel(&cached.text) {
+                            info!("Cached sentinel for '{}' — treating as miss, re-extracting", attach.name);
+                        } else {
+                            info!("Attachment cache hit for '{}' — skipping extraction", attach.name);
+                            extracted.push((attach.name.clone(), cached.text));
+                            continue;
+                        }
+                    } else {
+                        info!("Stale cache entry for '{}' — re-extracting", attach.name);
                     }
-                    info!("Stale cache entry for '{}' — re-extracting", attach.name);
                 }
 
                 // Slow path: extract now (user sent before pre-extraction finished,
@@ -459,6 +457,129 @@ pub async fn generate_stream(
             }
 
             inject_attachment_contents(&mut processed_messages, extracted);
+        }
+    }
+
+    // 1c. Persistent file context: store current attachments in DB, then re-inject
+    //     ALL historical attachments from previous messages in this conversation.
+    //     This gives ChatGPT/Gemini-style "the file stays in context forever" behaviour.
+    {
+        let db = &state.shared_state.database_pool;
+
+        // Store current attachment references (deduped via UNIQUE constraint in DB)
+        if let Some(ref attachments) = req.attachments {
+            if !attachments.is_empty() {
+                let refs: Vec<crate::memory_db::AttachmentRef<'_>> = attachments
+                    .iter()
+                    .map(|a| crate::memory_db::AttachmentRef {
+                        name: &a.name,
+                        source: &a.source,
+                        file_path: a.file_path.as_deref(),
+                        all_files_id: a.all_files_id,
+                        size_bytes: a.size_bytes,
+                    })
+                    .collect();
+                if let Err(e) = db.session_file_contexts.store_attachments(&session_id, &refs) {
+                    warn!("Failed to persist session file context references: {}", e);
+                }
+            }
+        }
+
+        // Re-read all historical files that were attached in PRIOR messages of this session
+        match db.session_file_contexts.get_for_session(&session_id) {
+            Ok(historical) if !historical.is_empty() => {
+                // Exclude files that are part of the CURRENT request (already injected above)
+                let current_names: std::collections::HashSet<&str> = req
+                    .attachments
+                    .as_ref()
+                    .map(|a| a.iter().map(|att| att.name.as_str()).collect())
+                    .unwrap_or_default();
+
+                let prior: Vec<_> = historical
+                    .iter()
+                    .filter(|h| !current_names.contains(h.file_name.as_str()))
+                    .collect();
+
+                if !prior.is_empty() {
+                    info!(
+                        "Re-injecting {} historical file(s) as persistent context for session {}",
+                        prior.len(),
+                        session_id
+                    );
+
+                    // Budget: 32k tokens total shared across all historical files
+                    const HIST_BUDGET: usize = 32_000;
+                    let budget_per_file = HIST_BUDGET / prior.len().max(1);
+
+                    let mut context_block = String::from(
+                        "Files previously shared in this conversation (always available as context):\n",
+                    );
+
+                    for hist in &prior {
+                        let chat_att = ChatAttachment {
+                            name: hist.file_name.clone(),
+                            source: hist.source.clone(),
+                            file_path: hist.file_path.clone(),
+                            all_files_id: hist.all_files_id,
+                            size_bytes: hist.size_bytes,
+                        };
+                        match try_extract_attachment(&chat_att, &state).await {
+                            Ok((name, content)) => {
+                                let (truncated, was_cut) =
+                                    truncate_to_budget(&content, budget_per_file);
+                                context_block.push_str(&format!(
+                                    "\n--- {} ---\n{}{}\n--- end of {} ---\n",
+                                    name,
+                                    truncated,
+                                    if was_cut { "\n[... file truncated for context ...]" } else { "" },
+                                    name
+                                ));
+                            }
+                            Err(e) => {
+                                // Non-fatal: file may have been deleted/moved since it was attached.
+                                warn!(
+                                    "Could not re-read historical attachment '{}': {}",
+                                    hist.file_name, e
+                                );
+                            }
+                        }
+                    }
+
+                    if context_block.len() > 80 {
+                        // Prepend as a system message (or extend existing system message)
+                        if let Some(first) = processed_messages.first_mut() {
+                            if first.role == "system" {
+                                first.content.push_str(&format!("\n\n{}", context_block));
+                            } else {
+                                processed_messages.insert(
+                                    0,
+                                    crate::memory::Message {
+                                        role: "system".to_string(),
+                                        content: context_block.clone(),
+                                    },
+                                );
+                            }
+                        } else {
+                            processed_messages.insert(
+                                0,
+                                crate::memory::Message {
+                                    role: "system".to_string(),
+                                    content: context_block.clone(),
+                                },
+                            );
+                        }
+                        info!(
+                            "Injected {} chars of persistent file context for session {}",
+                            context_block.len(),
+                            session_id
+                        );
+                    }
+                }
+            }
+            Ok(_) => {} // No historical files — nothing to inject
+            Err(e) => {
+                warn!("Could not retrieve session file contexts: {}", e);
+            }
         }
     }
 
@@ -644,7 +765,8 @@ pub async fn generate_stream(
             }
             Err(e) => {
                 error!("Failed to start OpenRouter stream: {}", e);
-                (StatusCode::BAD_GATEWAY, format!("OpenRouter API error: {}", e)).into_response()
+                let json_body = build_openrouter_error_json(&e.to_string());
+                (StatusCode::BAD_GATEWAY, axum::Json(json_body)).into_response()
             }
         }
     } else {
@@ -893,13 +1015,17 @@ async fn stream_openrouter_response(
 
                     match serde_json::from_str::<Value>(data) {
                         Ok(chunk) => {
+                            // Detect a non-null finish_reason that signals the model has stopped.
+                            // Any non-empty string value (e.g. "stop", "length", "end_turn",
+                            // "content_filter") means this is the last content chunk.
+                            // null / missing finish_reason means more tokens are coming.
                             let finished = chunk
                                 .get("choices")
                                 .and_then(|c| c.as_array())
                                 .map(|arr| arr.iter().any(|choice| {
                                     choice.get("finish_reason")
                                         .and_then(|fr| fr.as_str())
-                                        .map(|fr| fr != "stop" && fr != "length")
+                                        .map(|fr| !fr.is_empty())
                                         .unwrap_or(false)
                                 }))
                                 .unwrap_or(false);
@@ -923,4 +1049,91 @@ async fn stream_openrouter_response(
     };
 
     Ok(Box::pin(sse_stream))
+}
+
+/// Parse an anyhow error string from `stream_openrouter_response` (format:
+/// `"OpenRouter returned {status}: {json body}"`) and return a structured JSON
+/// object with `error_type` and a user-friendly `message`.
+fn build_openrouter_error_json(err_str: &str) -> serde_json::Value {
+    // Find the first `{` to locate the OpenRouter JSON body inside the error string.
+    if let Some(brace_pos) = err_str.find('{') {
+        let raw_body = &err_str[brace_pos..];
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw_body) {
+            let msg = v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("OpenRouter returned an error");
+            let code = v.get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_u64())
+                .unwrap_or(0) as u16;
+            let (error_type, user_message) = classify_openrouter_error(code, msg);
+            return serde_json::json!({
+                "error_type": error_type,
+                "message": user_message,
+            });
+        }
+    }
+    // Fallback: non-JSON error body (network failure, unexpected format, etc.)
+    serde_json::json!({
+        "error_type": "generic",
+        "message": "OpenRouter returned an error. Please try again or switch to a different model.",
+    })
+}
+
+/// Map an OpenRouter HTTP/error-body code + message text to an
+/// `(error_type, user_friendly_message)` pair.
+fn classify_openrouter_error(code: u16, msg: &str) -> (&'static str, String) {
+    let m = msg.to_lowercase();
+    if code == 402
+        || m.contains("credit")
+        || m.contains("insufficient")
+        || m.contains("balance")
+        || m.contains("billing")
+        || m.contains("quota")
+    {
+        (
+            "insufficient_credits",
+            "Your OpenRouter account has insufficient credits to process this request.".to_string(),
+        )
+    } else if (code == 400 || code == 413)
+        && (m.contains("context")
+            || m.contains("too long")
+            || m.contains("token")
+            || m.contains("length"))
+    {
+        (
+            "context_exceeded",
+            "This conversation exceeds the model's context limit. Try a shorter message or switch to a model with a larger context window.".to_string(),
+        )
+    } else if code == 429
+        || m.contains("rate limit")
+        || m.contains("rate_limit")
+        || m.contains("too many request")
+    {
+        (
+            "rate_limit",
+            "Rate limit exceeded for this model. Please wait a moment and try again, or switch to a different model.".to_string(),
+        )
+    } else if code == 401
+        || (m.contains("invalid") && (m.contains("key") || m.contains("api")))
+        || m.contains("unauthorized")
+        || m.contains("authentication")
+    {
+        (
+            "invalid_key",
+            "Your OpenRouter API key is invalid or expired. Please update it in the Models page.".to_string(),
+        )
+    } else if m.contains("not enabled")
+        || m.contains("developer instruction")
+        || m.contains("not supported")
+        || (m.contains("invalid request") && (m.contains("model") || m.contains("instruction")))
+    {
+        (
+            "model_restriction",
+            "This model has a restriction that prevents it from being used with this request. Try switching to a different model.".to_string(),
+        )
+    } else {
+        ("generic", format!("OpenRouter error: {}", msg))
+    }
 }

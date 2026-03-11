@@ -6,12 +6,14 @@ import { open as tauriOpenDialog } from '@tauri-apps/plugin-dialog';
 import { open as openInBrowser } from '@tauri-apps/plugin-shell';
 import { getApiBaseSync } from '../api/backendUrl';
 import { useChatTitle } from '../hooks/useChatTitle';
-import { useAuth } from '../contexts/AuthContext';
+import { useApiKeys } from '../contexts/ApiKeyContext';
 import { SaveTranscriptDialog } from './SaveTranscriptDialog';
 import { SaveTranscriptWebDialog } from './SaveTranscriptWebDialog';
 import MessageContent from './MessageContent';
 import { ModelPromptBanner } from './ModelPromptBanner';
 import { ErrorNavigationBox } from './ErrorNavigationBox';
+import { OpenRouterErrorCard } from './OpenRouterErrorCard';
+import { ShareModal } from './ShareModal';
 
 export interface Chat {
     id: string;
@@ -28,6 +30,8 @@ interface ModelApiEntry {
     name: string;
     status?: string;
     download_source?: string;
+    pricing?: { prompt: string; completion: string };
+    tags?: string[];
 }
 
 interface SimpleModel {
@@ -57,11 +61,12 @@ interface ChatWindowProps {
     onQuestionAsked: () => void;
     isOnlineMode?: boolean;
     onToggleOnlineMode?: (mode: boolean) => void;
-    selectedModel?: { id: string; name: string; source: 'local' | 'openrouter' } | null;
+    selectedModel?: { id: string; name: string; source: 'local' | 'openrouter'; pricing?: { prompt: string; completion: string } } | null;
     openRouterApiKey?: string;
     onOpenRouterApiKeyChange?: (key: string) => void;
-    onSelectedModelChange?: (model: { id: string; name: string; source: 'local' | 'openrouter' } | null) => void;
+    onSelectedModelChange?: (model: { id: string; name: string; source: 'local' | 'openrouter'; pricing?: { prompt: string; completion: string } } | null) => void;
     onOpenModels?: (focusApiKey?: boolean, focusHfToken?: boolean) => void;
+    onDownloadModel?: (modelId: string, modelName: string) => void;
 }
 
 export const ChatWindow: React.FC<ChatWindowProps> = ({
@@ -83,18 +88,36 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     onOpenRouterApiKeyChange,
     onSelectedModelChange,
     onOpenModels,
+    onDownloadModel,
 }) => {
     const firstPromptSent = useRef(false);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [openRouterError, setOpenRouterError] = useState<{ type: string; message: string } | null>(null);
+    // Paid model warning dialog state
+    const [showPaidModelWarning, setShowPaidModelWarning] = useState(false);
+    const pendingAutoSend = useRef(false);
+    // Message action states
+    const [editingMsgIdx, setEditingMsgIdx] = useState<number | null>(null);
+    const [editDraft, setEditDraft] = useState('');
+    const [likedMsgs, setLikedMsgs] = useState<Set<number>>(new Set());
+    const [dislikedMsgs, setDislikedMsgs] = useState<Set<number>>(new Set());
+    const [shareModalContent, setShareModalContent] = useState<string | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const chatMessagesRef = useRef<HTMLElement>(null);
+    const isAtBottomRef = useRef(true);
     const [isDropdownOpen, setIsDropdownOpen] = useState(false);
     const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
-    const [openRouterModels, setOpenRouterModels] = useState<Array<{ id: string; name: string }>>([]);
+    const [isChatInputModelDropdownOpen, setIsChatInputModelDropdownOpen] = useState(false);
+    const [openRouterModels, setOpenRouterModels] = useState<Array<{ id: string; name: string; pricing?: { prompt: string; completion: string } }>>([]);
     const [localModels, setLocalModels] = useState<Array<{ id: string; name: string }>>([]);
+    const [availableHfModels, setAvailableHfModels] = useState<Array<{ id: string; name: string }>>([]);
     const dropdownRef = useRef<HTMLDivElement>(null);
     const modelDropdownRef = useRef<HTMLDivElement>(null);
+    const chatInputModelDropdownRef = useRef<HTMLDivElement>(null);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    // Tracks whether a model switch is in progress (dispatched by ModelsPanel via custom event)
+    const [isModelActivating, setIsModelActivating] = useState(false);
 
     // ── OpenRouter API-key portal modal (replaces DOM-injected showOpenRouterApiKeyModal) ──
     const [orModalStep, setOrModalStep] = useState<'none' | 'choice' | 'input'>('none');
@@ -112,35 +135,41 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
     const closeOrModal = () => { setOrModalStep('none'); setOrKeyInput(''); setOrKeyError(false); setOrKeyInputError(''); };
 
-    const verifyApiKey = async (keyType: 'openrouter' | 'huggingface', apiKey: string): Promise<{ valid: boolean; message: string }> => {
-        try {
-            const response = await fetch(`${getApiBaseSync()}/api-keys/verify`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ key_type: keyType, api_key: apiKey }),
-            });
-            const data = await response.json();
-            return { valid: data.valid, message: data.message };
-        } catch (error) {
-            return { valid: false, message: 'Failed to verify API key. Please check your internet connection.' };
-        }
+    // ── HuggingFace token portal modal (for offline model download from chat input) ──
+    const [hfModalStep, setHfModalStep] = useState<'none' | 'choice' | 'input'>('none');
+    const [hfKeyInput, setHfKeyInput] = useState('');
+    const [hfKeyError, setHfKeyError] = useState(false);
+    const [hfKeyInputError, setHfKeyInputError] = useState('');
+    const hfKeyRef = useRef<HTMLInputElement>(null);
+    // Callback fired after a HF token is successfully saved — used to auto-trigger
+    // a pending download that was blocked because no token was present.
+    const hfOnCompleteRef = useRef<(() => void) | null>(null);
+
+    useEffect(() => {
+        if (hfModalStep === 'input') setTimeout(() => hfKeyRef.current?.focus(), 50);
+    }, [hfModalStep]);
+
+    const closeHfModal = () => { setHfModalStep('none'); setHfKeyInput(''); setHfKeyError(false); setHfKeyInputError(''); };
+
+    // Helper function to check if an OpenRouter model is free
+    const isOpenRouterModelFree = (model: typeof selectedModel): boolean => {
+        if (!model || model.source !== 'openrouter') return true;
+        if (!model.pricing) return false; // Assume paid if no pricing info
+        return (model.pricing.prompt === '0' || model.pricing.prompt === '') &&
+               (model.pricing.completion === '0' || model.pricing.completion === '');
     };
 
-    const saveOrKey = async () => {
+    // ── Download confirmation state (offline mode chat input dropdown) ──
+    // When user clicks a downloadable model we ask "Start downloading X?" before
+    // triggering the actual download — avoids accidental large downloads.
+    const [downloadConfirm, setDownloadConfirm] = useState<{ id: string; name: string } | null>(null);
+
+    const saveOrKey = () => {
         const key = orKeyInput.trim();
         if (!key) { setOrKeyError(true); setTimeout(() => setOrKeyError(false), 1000); return; }
-        
-        // Verify the key first
-        const verification = await verifyApiKey('openrouter', key);
-        if (!verification.valid) {
-            setOrKeyError(true);
-            setOrKeyInputError(verification.message);
-            setTimeout(() => { setOrKeyError(false); setOrKeyInputError(''); }, 3000);
-            return;
-        }
-        
-        setApiKey?.('openrouter', key);
-        orOnKeySavedRef.current?.(key);
+        // Persist to OS keychain + localStorage + React state via context (matches ModelsPanel behavior).
+        setOpenRouterApiKey(key);
+        orOnKeySavedRef.current?.(key); // notify the modal opener (e.g. propagate to prop callback)
         closeOrModal();
         orOnCompleteRef.current?.();
     };
@@ -149,7 +178,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     const [localFileAttachments, setLocalFileAttachments] = useState<ChatAttachment[]>([]);
     const [removingFiles, setRemovingFiles] = useState<Set<string>>(new Set());
     const { generateTitle } = useChatTitle();
-    const { setApiKey } = useAuth();
+    // Single source of truth for API keys — reads and writes go through ApiKeyContext
+    // which persists to OS keychain + localStorage and broadcasts to all subscribers.
+    const { hfToken, setHfToken, setOpenRouterApiKey } = useApiKeys();
 
 
 
@@ -169,16 +200,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     const [curatedPickerQuery, setCuratedPickerQuery] = useState('');
     const curatedPickerRef = useRef<HTMLDivElement>(null);
     
-    // Ensure we're using the most current API key from localStorage
-    useEffect(() => {
-        if (!openRouterApiKey && localStorage.getItem('aud-io-openrouter-key')) {
-            const storedKey = localStorage.getItem('aud-io-openrouter-key');
-            if (storedKey) {
-                onOpenRouterApiKeyChange?.(storedKey);
-            }
-        }
-    }, [openRouterApiKey, onOpenRouterApiKeyChange]);
-
     const hasMessages = messages.filter(m => m.role !== 'system').length > 0;
 
     // Check backend readiness with retry logic
@@ -252,12 +273,26 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             if (modelDropdownRef.current && !modelDropdownRef.current.contains(event.target as Node)) {
                 setIsModelDropdownOpen(false);
             }
+            if (chatInputModelDropdownRef.current && !chatInputModelDropdownRef.current.contains(event.target as Node)) {
+                setIsChatInputModelDropdownOpen(false);
+            }
         };
-        if (isDropdownOpen || isModelDropdownOpen) {
+        if (isDropdownOpen || isModelDropdownOpen || isChatInputModelDropdownOpen) {
             document.addEventListener('mousedown', handleClickOutside);
             return () => document.removeEventListener('mousedown', handleClickOutside);
         }
-    }, [isDropdownOpen, isModelDropdownOpen]);
+    }, [isDropdownOpen, isModelDropdownOpen, isChatInputModelDropdownOpen]);
+
+    // Listen for model-loading events dispatched by ModelsPanel (works across mount cycles
+    // because ModelsPanel is unmounted before its async handleSwitchModel completes).
+    useEffect(() => {
+        const handleModelLoading = (e: Event) => {
+            const { loading } = (e as CustomEvent<{ loading: boolean }>).detail;
+            setIsModelActivating(loading);
+        };
+        window.addEventListener('aud-io:model-loading', handleModelLoading);
+        return () => window.removeEventListener('aud-io:model-loading', handleModelLoading);
+    }, []);
 
     // Fetch all models from the model management system (pure async - no retries)
     useEffect(() => {
@@ -286,9 +321,32 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     model.status === 'Installed' && model.download_source !== 'openrouter'
                 );
 
-                // Update OpenRouter models for the dropdown
-                setOpenRouterModels(orModels.map((model: ModelApiEntry) => ({
-                    id: model.id.replace('openrouter:', ''),
+                // Separate available HF models (not installed) for download dropdown
+                const hfModels = models.filter((model: ModelApiEntry) =>
+                    model.download_source === 'huggingface' && model.status !== 'Installed'
+                );
+
+                // Capsule / input-box dropdown: show only the curated free models (no rate limits).
+                const PREFERRED_FREE_NAMES = [
+                    'Nemotron 3 Nano 30B A3B',
+                    'Trinity Large Preview',
+                    'Qwen3 Next 80B',
+                    'GPT-OSS 120B',
+                    'Kimi K2 Large',
+                ];
+                const preferredModels = PREFERRED_FREE_NAMES.flatMap(name => {
+                    const match = orModels.find((m: ModelApiEntry) =>
+                        m.name.toLowerCase().includes(name.toLowerCase())
+                    );
+                    return match ? [{ id: match.id.replace('openrouter:', ''), name: match.name, pricing: match.pricing }] : [];
+                });
+
+                // Update OpenRouter models for the dropdown (4 curated free models)
+                setOpenRouterModels(preferredModels);
+
+                // Update available HF models for the dropdown
+                setAvailableHfModels(hfModels.slice(0, 20).map((model: ModelApiEntry) => ({
+                    id: model.id,
                     name: model.name
                 })));
 
@@ -371,13 +429,32 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         fetchAllModels();
     }, [isOnlineMode, selectedModel, onSelectedModelChange]);
 
+    const handleChatScroll = () => {
+        const el = chatMessagesRef.current;
+        if (!el) return;
+        isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    };
+
     const scrollToBottom = () => {
+        if (!isAtBottomRef.current) return;
         if (messagesEndRef.current && typeof messagesEndRef.current.scrollIntoView === 'function') {
             messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
         }
     };
 
     useEffect(() => { scrollToBottom(); }, [messages]);
+
+    // Clear any displayed OpenRouter error card when the user switches to a different chat.
+    useEffect(() => { setOpenRouterError(null); }, [sessionId]);
+
+    // Auto-send when model switches to a free one (after "Switch to Free Model" in paid dialog)
+    useEffect(() => {
+        if (pendingAutoSend.current && selectedModel && isOpenRouterModelFree(selectedModel)) {
+            pendingAutoSend.current = false;
+            handleSend();
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedModel?.id]);
 
     // Fetch all_files for @filename autocomplete and curated picker
     // Uses /all-files/all — user-managed RAG files for context inclusion
@@ -561,64 +638,145 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         f.name.toLowerCase().includes(curatedPickerQuery.toLowerCase())
     );
 
-    const handleSend = async () => {
-        if (!input.trim() || isLoading) return;
-        
+    // ── helpers for message actions ────────────────────────────────────────
+    const copyToClipboard = (text: string) =>
+        navigator.clipboard.writeText(text).catch(console.error);
+
+    const toggleLike = (idx: number) => {
+        setLikedMsgs(prev => {
+            const next = new Set(prev);
+            next.has(idx) ? next.delete(idx) : next.add(idx);
+            return next;
+        });
+        setDislikedMsgs(prev => { const next = new Set(prev); next.delete(idx); return next; });
+    };
+
+    const toggleDislike = (idx: number) => {
+        setDislikedMsgs(prev => {
+            const next = new Set(prev);
+            next.has(idx) ? next.delete(idx) : next.add(idx);
+            return next;
+        });
+        setLikedMsgs(prev => { const next = new Set(prev); next.delete(idx); return next; });
+    };
+    // ── end helpers ────────────────────────────────────────────────────────
+
+    const handleSend = async (regenPayload?: { messages: Message[]; sid: string }) => {
+        if (isLoading) return;
+        if (!regenPayload && !input.trim()) return;
+
+        // Always scroll to bottom when user sends a message.
+        isAtBottomRef.current = true;
+
+        // Dismiss any previous OpenRouter error card when the user sends a new message.
+        setOpenRouterError(null);
+
         // Check backend readiness before sending message
         if (!backendReady) {
             console.log('Backend not ready');
+            // Show a visible message instead of silently dropping the send
+            const errMsg: Message = { role: 'assistant', content: 'The backend is still initializing. Please wait a moment and try again.' };
+            onMessagesUpdate([...messages, { role: 'user', content: input.trim() }, errMsg]);
             return;
         }
 
-        let currentSessionId = sessionId;
-        if (!currentSessionId) {
-            currentSessionId = Date.now().toString();
-            onSessionIdChange(currentSessionId);
+        // Check if using a paid OpenRouter model - show warning dialog if not confirmed
+        const isPaidModel = isOnlineMode && selectedModel?.source === 'openrouter' && !isOpenRouterModelFree(selectedModel);
+        if (isPaidModel && !regenPayload) {
+            setShowPaidModelWarning(true);
+            return;
         }
 
-        // Build attachment list — references only (OS paths or DB IDs).
-        // Backend reads and extracts all file content server-side, for BOTH
-        // offline (local LLM) and online (OpenRouter) modes.
-        // No base64 encoding, no content fetching here.
-        const allAttachments: ChatAttachment[] = [...attachedFiles, ...localFileAttachments];
-        console.log('[DEBUG] Attachments to send:', allAttachments.length,
-            '(inline:', attachedFiles.length, 'local_storage:', localFileAttachments.length, ')');
-        allAttachments.forEach((a, i) =>
-            console.log('[DEBUG] Attachment', i, ':', a.name, 'source:', a.source,
-                'file_path:', a.file_path || '-', 'all_files_id:', a.all_files_id ?? '-'));
-
-        // Get all file names for display in the user message annotation
-        const allFileNames = allAttachments.map(a => a.name);
-        const fileContext = allFileNames.length > 0
-            ? `\n[Attached files: ${allFileNames.join(', ')}]`
-            : '';
-
-        const firstPrompt = !firstPromptSent.current ? input.trim() : null;
-
-        // Determine routing — same attachments array is used for BOTH modes.
-        // Backend handles server-side file extraction for offline and online.
+        // Determine routing — used in both normal and regen paths.
         const useOpenRouter = isOnlineMode && selectedModel?.source === 'openrouter' && openRouterApiKey;
-        const userContent = input.trim() + fileContext;
-        
-        const userMsg: Message = { role: 'user', content: userContent };
-        const newMessages = [...messages, userMsg];
 
-        onMessagesUpdate(newMessages);
-        setInput('');
-        setAttachedFiles([]);
-        setLocalFileAttachments([]);
-        setIsLoading(true);
-        onQuestionAsked();
+        let currentSessionId: string;
+        let newMessages: Message[];
+        let allAttachments: ChatAttachment[] = [];
+
+        if (regenPayload) {
+            // ── Regeneration path ─────────────────────────────────────────────
+            currentSessionId = regenPayload.sid;
+            newMessages = regenPayload.messages;
+            setIsLoading(true);
+        } else {
+            // ── Normal send path ──────────────────────────────────────────────
+            currentSessionId = sessionId || Date.now().toString();
+            if (!sessionId) onSessionIdChange(currentSessionId);
+
+            // Build attachment list — references only (OS paths or DB IDs).
+            // Backend reads and extracts all file content server-side, for BOTH
+            // offline (local LLM) and online (OpenRouter) modes.
+            // No base64 encoding, no content fetching here.
+            allAttachments = [...attachedFiles, ...localFileAttachments];
+            console.log('[DEBUG] Attachments to send:', allAttachments.length,
+                '(inline:', attachedFiles.length, 'local_storage:', localFileAttachments.length, ')');
+            allAttachments.forEach((a, i) =>
+                console.log('[DEBUG] Attachment', i, ':', a.name, 'source:', a.source,
+                    'file_path:', a.file_path || '-', 'all_files_id:', a.all_files_id ?? '-'));
+
+            // Get all file names for display in the user message annotation
+            const allFileNames = allAttachments.map(a => a.name);
+            const fileContext = allFileNames.length > 0
+                ? `\n[Attached files: ${allFileNames.join(', ')}]`
+                : '';
+
+            const firstPrompt = !firstPromptSent.current ? input.trim() : null;
+
+            const userContent = input.trim() + fileContext;
+            const userMsg: Message = { role: 'user', content: userContent };
+            newMessages = [...messages, userMsg];
+
+            onMessagesUpdate(newMessages);
+            setInput('');
+            setAttachedFiles([]);
+            setLocalFileAttachments([]);
+            setIsLoading(true);
+            onQuestionAsked();
 
         if (firstPrompt && !chatTitle) {
             firstPromptSent.current = true;
-            // Use the first 50 chars of the user's message as the title — same pattern
-            // as ChatGPT, Claude.ai, etc. Instant, no extra LLM call, always readable.
-            const firstMsgTitle = firstPrompt.slice(0, 50) + (firstPrompt.length > 50 ? '...' : '');
-            updateConversationTitle(currentSessionId!, firstMsgTitle)
-                .catch(err => console.error('Failed to save title:', err));
-            onTitleGenerated?.(firstMsgTitle, currentSessionId!);
+            // Show a placeholder immediately so the sidebar entry isn't blank.
+            const placeholder = firstPrompt.slice(0, 50) + (firstPrompt.length > 50 ? '...' : '');
+            onTitleGenerated?.(placeholder, currentSessionId!);
+
+            // ── Title generation: offline = sequential (title first, then stream)  ──
+            //                      online  = concurrent (both fire simultaneously)  ──
+            //
+            // Offline: title gen and stream share the same LLM worker.  Firing title
+            // first (20 tokens) means it completes in ~1-2 s and the sidebar updates
+            // with a real title before the first stream token arrives.  A 2.5 s cap
+            // ensures slow hardware never delays the stream for too long.
+            //
+            // Online: title goes directly to OpenRouter; stream goes through the backend
+            // proxy.  Fully independent — no queuing.  Title (20 tokens) resolves within
+            // 1 s; the stream starts immediately in parallel.
+            const capturedSessionId = currentSessionId!;
+            const capturedPrompt    = firstPrompt;
+            const onlineParams = (isOnlineMode && openRouterApiKey && selectedModel?.source === 'openrouter')
+                ? { apiKey: openRouterApiKey, modelId: selectedModel.id }
+                : undefined;
+
+            if (!isOnlineMode) {
+                // Offline-sequential: await title (capped at 2.5 s) then start stream.
+                try {
+                    const titleResult = await Promise.race([
+                        generateTitle(capturedPrompt, undefined),
+                        new Promise<null>(r => setTimeout(() => r(null), 2500)),
+                    ]);
+                    if (titleResult) {
+                        updateConversationTitle(capturedSessionId, titleResult).catch(console.error);
+                        onTitleGenerated?.(titleResult, capturedSessionId);
+                    }
+                } catch { /* title gen failed — placeholder stays, stream proceeds */ }
+            } else {
+                // Online: use first 50 chars of prompt as sidebar title — no LLM call needed.
+                const shortTitle = capturedPrompt.slice(0, 50) + (capturedPrompt.length > 50 ? '...' : '');
+                updateConversationTitle(capturedSessionId, shortTitle).catch(console.error);
+                onTitleGenerated?.(shortTitle, capturedSessionId);
+            }
         }
+        } // end else (normal send path)
 
         try {
             onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: '' }]);
@@ -645,6 +803,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     fullContent += chunk;
                     onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: fullContent }]);
                 }
+
+                // Belt-and-suspenders: if the stream completed with no content at all
+                // (e.g. OpenRouter sent keep-alive pings only, or an unrecognised event
+                // format), show the error card rather than leaving a blank chat bubble.
+                if (!fullContent.trim()) {
+                    setOpenRouterError({
+                        type: 'generic',
+                        message: 'The model returned an empty response. This may be due to quota limits or model unavailability.',
+                    });
+                    onMessagesUpdate([...newMessages]); // Remove the empty assistant placeholder
+                    return;
+                }
             } else {
                 // Route to local llama-server — backend extracts content from attachments
                 for await (const chunk of streamChat(
@@ -662,6 +832,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         } catch (error: unknown) {
             console.error('Chat error:', error);
             const errMessage = error instanceof Error ? error.message : 'Unknown error';
+
+            // Structured OpenRouter error from chat.ts sentinel "__OPENROUTER_ERROR__:type:msg".
+            // Show the typed error card and remove the empty assistant placeholder.
+            if (errMessage.startsWith('__OPENROUTER_ERROR__:')) {
+                const withoutPrefix = errMessage.slice('__OPENROUTER_ERROR__:'.length);
+                const firstColon = withoutPrefix.indexOf(':');
+                const errorType = firstColon >= 0 ? withoutPrefix.slice(0, firstColon) : 'generic';
+                const errorDetail = firstColon >= 0 ? withoutPrefix.slice(firstColon + 1) : withoutPrefix;
+                setOpenRouterError({ type: errorType, message: errorDetail });
+                onMessagesUpdate([...newMessages]); // Remove the empty assistant placeholder
+                return;
+            }
+
             let errorMsg = `An error occurred: ${errMessage}`;
 
             if (errMessage.includes('OpenRouter')) {
@@ -673,17 +856,49 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     errorMsg = 'Could not connect to the LLM backend. Make sure the model is loaded and llama-server is running on port 8001.';
                 }
             }
-            
+
             onMessagesUpdate([...newMessages, { role: 'assistant' as const, content: errorMsg }]);
 
         } finally {
             setIsLoading(false);
         }
+
+        // Title generation now runs BEFORE the stream (see above).
+        // Nothing to do here after the stream completes.
     };
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         handleSend();
+    };
+
+    /** Remove the assistant message at filtered index `assistantIdx` (and everything
+     *  after it) then re-run the stream with the preceding user message. */
+    const handleRegenerate = (assistantIdx: number) => {
+        if (isLoading || !sessionId) return;
+        const sysMessages = messages.filter(m => m.role === 'system');
+        const nonSys     = messages.filter(m => m.role !== 'system');
+        // Keep all non-system messages strictly before the assistant message
+        const kept = nonSys.slice(0, assistantIdx);
+        const truncated = [...sysMessages, ...kept];
+        onMessagesUpdate(truncated);
+        setEditingMsgIdx(null);
+        handleSend({ messages: truncated, sid: sessionId });
+    };
+
+    /** Replace the user message at filtered index `userIdx` with `newText`,
+     *  drop everything after it, and re-run the stream. */
+    const handleEditSave = (userIdx: number, newText: string) => {
+        if (!newText.trim() || !sessionId) return;
+        setEditingMsgIdx(null);
+        const sysMessages = messages.filter(m => m.role === 'system');
+        const nonSys     = messages.filter(m => m.role !== 'system');
+        // Keep messages before this user message, then add the edited user message
+        const kept = nonSys.slice(0, userIdx);
+        const editedMsg: Message = { role: 'user', content: newText.trim() };
+        const truncated = [...sysMessages, ...kept, editedMsg];
+        onMessagesUpdate(truncated);
+        handleSend({ messages: truncated, sid: sessionId });
     };
 
     const [showSaveDialog, setShowSaveDialog] = useState(false);
@@ -756,13 +971,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         }
     };
 
-    const handleRemoveFile = (fileName: string) => {
-        setRemovingFiles(prev => new Set(prev).add(fileName));
+    const handleRemoveFile = (filePath: string) => {
+        setRemovingFiles(prev => new Set(prev).add(filePath));
         setTimeout(() => {
-            setAttachedFiles(prev => prev.filter(f => f.name !== fileName));
+            setAttachedFiles(prev => prev.filter(f => f.file_path !== filePath));
             setRemovingFiles(prev => {
                 const next = new Set(prev);
-                next.delete(fileName);
+                next.delete(filePath);
                 return next;
             });
         }, 250); // matches chipSlideOut animation duration
@@ -888,63 +1103,82 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     <span style={{
                                         width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0,
                                         backgroundColor: isOnlineMode
-                                            ? (hasOnlineCapability ? '#22C55E' : '#EF4444')
-                                            : (hasOfflineCapability ? '#22C55E' : '#EF4444'),
+                                            ? (hasOnlineCapability ? '#22C55E' : '#B91C1C')
+                                            : (hasOfflineCapability ? '#22C55E' : '#B91C1C'),
                                         boxShadow: isOnlineMode
-                                            ? (hasOnlineCapability ? '0 0 5px rgba(34,197,94,0.7)' : '0 0 5px rgba(239,68,68,0.7)')
-                                            : (hasOfflineCapability ? '0 0 5px rgba(34,197,94,0.7)' : '0 0 5px rgba(239,68,68,0.7)'),
+                                            ? (hasOnlineCapability ? '0 0 6px rgba(34,197,94,0.7)' : '0 0 6px rgba(239,68,68,0.65)')
+                                            : (hasOfflineCapability ? '0 0 6px rgba(34,197,94,0.7)' : '0 0 6px rgba(239,68,68,0.65)'),
                                     }} />
                                     {selectedModel.name}
                                 </span>
                                 
                                 {isModelDropdownOpen && (
                                     <div className="dropdown-menu" style={{ top: '100%', marginTop: '4px', minWidth: '220px' }}>
-                                        {/* Show top-9 online models if in online mode */}
-                                        {isOnlineMode && openRouterModels.length > 0 && (
-                                            <>
-                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: '#5B21B6', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid var(--bg-tertiary)' }}>
-                                                    ● Top Online Models
-                                                </div>
-                                                {openRouterModels.slice(0, 9).map((model) => (
-                                                    <button
-                                                        key={model.id}
-                                                        className="dropdown-item"
-                                                        style={{
-                                                            fontSize: '12px',
-                                                            padding: '3px 10px',
-                                                            borderRadius: '999px',
-                                                            backgroundColor: selectedModel.id === model.id && selectedModel.source === 'openrouter' ? '#EDE9FE' : 'var(--bg-tertiary)',
-                                                            color: selectedModel.id === model.id && selectedModel.source === 'openrouter' ? '#5B21B6' : 'var(--text-secondary)',
-                                                            border: 'none',
-                                                            cursor: 'pointer',
-                                                            textAlign: 'left',
-                                                            width: '100%',
-                                                            marginBottom: '4px'
-                                                        }}
-                                                        onClick={() => {
-                                                            onSelectedModelChange?.({ id: model.id, name: model.name, source: 'openrouter' });
-                                                            setIsModelDropdownOpen(false);
-                                                        }}
-                                                    >
-                                                        <span>{model.name}</span>
-                                                    </button>
-                                                ))}
-                                                <button
-                                                    onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
-                                                    style={{ display: 'block', width: '100%', padding: '6px 12px', fontSize: '11px', color: '#5B21B6', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderTop: '1px solid var(--bg-tertiary)', marginTop: '2px' }}
-                                                >
-                                                    View all models →
-                                                </button>
-                                            </>
+                                        {/* Show top-5 online models if in online mode and has API key */}
+                                        {isOnlineMode && (
+                                            (() => {
+                                                const hasOpenRouterKey = openRouterApiKey || localStorage.getItem('aud-io-openrouter-key');
+                                                if (!hasOpenRouterKey) {
+                                                    return (
+                                                        <div style={{ padding: '16px 12px', textAlign: 'center' }}>
+                                                            <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                                                No OpenRouter API key found.
+                                                            </p>
+                                                            <button
+                                                                onClick={() => {
+                                                                    setIsModelDropdownOpen(false);
+                                                                    orOnKeySavedRef.current = (newKey) => { onOpenRouterApiKeyChange?.(newKey); };
+                                                                    orOnCompleteRef.current = null;
+                                                                    setOrModalStep('choice');
+                                                                }}
+                                                                style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: 'var(--text-primary)', color: 'var(--bg-primary)', border: '1px solid var(--text-primary)', cursor: 'pointer', fontWeight: 500 }}
+                                                            >
+                                                                Add OpenRouter Key
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                }
+                                                return (
+                                                    <>
+                                                        <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-primary)' }}>
+                                                            APIs
+                                                        </div>
+                                                        {openRouterModels.slice(0, 5).map((model) => (
+                                                            <button
+                                                                key={model.id}
+                                                                className="dropdown-item"
+                                                                style={{
+                                                                    fontSize: '12px',
+                                                                    padding: '3px 10px',
+                                                                    borderRadius: '999px',
+                                                                    backgroundColor: selectedModel.id === model.id && selectedModel.source === 'openrouter' ? 'var(--bg-tertiary)' : 'transparent',
+                                                                    color: selectedModel.id === model.id && selectedModel.source === 'openrouter' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                                                                    border: 'none',
+                                                                    cursor: 'pointer',
+                                                                    textAlign: 'left',
+                                                                    width: '100%',
+                                                                    marginBottom: '4px'
+                                                                }}
+                                                                onClick={() => {
+                                                                    onSelectedModelChange?.({ id: model.id, name: model.name, source: 'openrouter', pricing: model.pricing });
+                                                                    setIsModelDropdownOpen(false);
+                                                                }}
+                                                            >
+                                                                <span>{model.name}</span>
+                                                            </button>
+                                                        ))}
+                                                    </>
+                                                );
+                                            })()
                                         )}
 
-                                        {/* Show top-9 local/offline models if in offline mode */}
+                                        {/* Show top-5 local/offline models if in offline mode */}
                                         {!isOnlineMode && localModels.length > 0 && (
                                             <>
-                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-primary)', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid var(--bg-tertiary)' }}>
-                                                    ● Offline Models
+                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-primary)' }}>
+                                                    Available on device
                                                 </div>
-                                                {localModels.slice(0, 9).map((model) => (
+                                                {localModels.slice(0, 5).map((model) => (
                                                     <button
                                                         key={model.id}
                                                         className="dropdown-item"
@@ -986,7 +1220,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                                 <p style={{ margin: '0 0 8px 0', fontSize: '11px', color: 'var(--text-muted)' }}>Add an OpenRouter API key to use cloud models.</p>
                                                 <button
                                                     onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
-                                                    style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: '#1e40af', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 500 }}
+                                                    style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: 'var(--text-primary)', color: 'var(--bg-primary)', border: '1px solid var(--text-primary)', cursor: 'pointer', fontWeight: 500 }}
                                                 >
                                                     Browse Models
                                                 </button>
@@ -998,12 +1232,26 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                                 <p style={{ margin: '0 0 8px 0', fontSize: '11px', color: 'var(--text-muted)' }}>Download models to use them locally without internet.</p>
                                                 <button
                                                     onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
-                                                    style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: '#1e40af', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 500 }}
+                                                    style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: 'var(--text-primary)', color: 'var(--bg-primary)', border: '1px solid var(--text-primary)', cursor: 'pointer', fontWeight: 500 }}
                                                 >
                                                     Browse & Download
                                                 </button>
                                             </div>
                                         )}
+                                        {/* Available APIs footer link */}
+                                        <div style={{ borderTop: '1px solid var(--border-primary)', marginTop: '4px', padding: '6px 8px' }}>
+                                            <button
+                                                onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
+                                                style={{
+                                                    width: '100%', padding: '6px 10px', borderRadius: '9999px',
+                                                    fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+                                                    background: 'var(--text-primary)', color: 'var(--bg-primary)',
+                                                    border: 'none', textAlign: 'center', letterSpacing: '0.02em',
+                                                }}
+                                            >
+                                                Available APIs
+                                            </button>
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -1035,11 +1283,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     <span style={{
                                         width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0,
                                         backgroundColor: isOnlineMode
-                                            ? (hasOnlineCapability ? '#22C55E' : '#EF4444')
-                                            : (hasOfflineCapability ? '#22C55E' : '#EF4444'),
+                                            ? (hasOnlineCapability ? '#22C55E' : '#B91C1C')
+                                            : (hasOfflineCapability ? '#22C55E' : '#B91C1C'),
                                         boxShadow: isOnlineMode
-                                            ? (hasOnlineCapability ? '0 0 5px rgba(34,197,94,0.7)' : '0 0 5px rgba(239,68,68,0.7)')
-                                            : (hasOfflineCapability ? '0 0 5px rgba(34,197,94,0.7)' : '0 0 5px rgba(239,68,68,0.7)'),
+                                            ? (hasOnlineCapability ? '0 0 6px rgba(34,197,94,0.7)' : '0 0 6px rgba(239,68,68,0.65)')
+                                            : (hasOfflineCapability ? '0 0 6px rgba(34,197,94,0.7)' : '0 0 6px rgba(239,68,68,0.65)'),
                                     }} />
                                     Browse Models
                                 </span>
@@ -1047,16 +1295,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     <div className="dropdown-menu" style={{ top: '100%', marginTop: '4px', minWidth: '220px' }}>
                                         {isOnlineMode && openRouterModels.length > 0 && (
                                             <>
-                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: '#5B21B6', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid var(--bg-tertiary)' }}>
-                                                    ● Top Online Models
+                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-primary)' }}>
+                                                    APIs
                                                 </div>
-                                                {openRouterModels.slice(0, 9).map((model) => (
+                                                {openRouterModels.slice(0, 5).map((model) => (
                                                     <button
                                                         key={model.id}
                                                         className="dropdown-item"
                                                         style={{ fontSize: '12px', padding: '6px 12px', border: 'none', cursor: 'pointer', textAlign: 'left', width: '100%', marginBottom: '2px' }}
                                                         onClick={() => {
-                                                            onSelectedModelChange?.({ id: model.id, name: model.name, source: 'openrouter' });
+                                                            onSelectedModelChange?.({ id: model.id, name: model.name, source: 'openrouter', pricing: model.pricing });
                                                             setIsModelDropdownOpen(false);
                                                         }}
                                                     >
@@ -1065,7 +1313,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                                 ))}
                                                 <button
                                                     onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
-                                                    style={{ display: 'block', width: '100%', padding: '6px 12px', fontSize: '11px', color: '#5B21B6', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderTop: '1px solid var(--bg-tertiary)', marginTop: '2px' }}
+                                                    style={{ display: 'block', width: '100%', padding: '6px 12px', fontSize: '11px', color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', borderTop: '1px solid var(--border-primary)', marginTop: '2px' }}
                                                 >
                                                     View all models →
                                                 </button>
@@ -1073,10 +1321,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                         )}
                                         {!isOnlineMode && localModels.length > 0 && (
                                             <>
-                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-primary)', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid var(--bg-tertiary)' }}>
-                                                    ● Offline Models
+                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-primary)' }}>
+                                                    Available on device
                                                 </div>
-                                                {localModels.slice(0, 9).map((model) => (
+                                                {localModels.slice(0, 5).map((model) => (
                                                     <button
                                                         key={model.id}
                                                         className="dropdown-item"
@@ -1099,14 +1347,42 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                                 )}
                                             </>
                                         )}
-                                        {((isOnlineMode && openRouterModels.length === 0) || (!isOnlineMode && localModels.length === 0)) && (
-                                            <div style={{ padding: '12px', fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'center' }}>
-                                                <p style={{ margin: '0 0 8px 0' }}>{isOnlineMode ? 'No online models available.' : 'No offline models installed.'}</p>
+                                        {isOnlineMode && openRouterModels.length === 0 && (
+                                            <div style={{ padding: '16px 12px', textAlign: 'center' }}>
+                                                <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                                    {(openRouterApiKey || localStorage.getItem('aud-io-openrouter-key'))
+                                                        ? 'No online models available.'
+                                                        : 'No OpenRouter API key found.'}
+                                                </p>
+                                                {!(openRouterApiKey || localStorage.getItem('aud-io-openrouter-key')) && (
+                                                    <button
+                                                        onClick={() => {
+                                                            setIsModelDropdownOpen(false);
+                                                            orOnKeySavedRef.current = (newKey) => { onOpenRouterApiKeyChange?.(newKey); };
+                                                            orOnCompleteRef.current = null;
+                                                            setOrModalStep('choice');
+                                                        }}
+                                                        style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: '#5B21B6', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 500, marginBottom: '8px' }}
+                                                    >
+                                                        Add OpenRouter Key
+                                                    </button>
+                                                )}
                                                 <button
                                                     onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
-                                                    style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: isOnlineMode ? '#6366F1' : '#1e40af', color: 'white', border: 'none', cursor: 'pointer', fontWeight: 500 }}
+                                                    style={{ display: 'block', width: '100%', fontSize: '11px', padding: '4px', color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer' }}
                                                 >
-                                                    {isOnlineMode ? 'Open Models Panel' : 'Browse & Download'}
+                                                    Open Models Panel →
+                                                </button>
+                                            </div>
+                                        )}
+                                        {!isOnlineMode && localModels.length === 0 && (
+                                            <div style={{ padding: '12px', fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'center' }}>
+                                                <p style={{ margin: '0 0 8px 0' }}>No offline models installed.</p>
+                                                <button
+                                                    onClick={() => { setIsModelDropdownOpen(false); onOpenModels?.(); }}
+                                                    style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: 'var(--text-primary)', color: 'var(--bg-primary)', border: '1px solid var(--text-primary)', cursor: 'pointer', fontWeight: 500 }}
+                                                >
+                                                    Browse &amp; Download
                                                 </button>
                                             </div>
                                         )}
@@ -1124,10 +1400,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 type="button"
                                 className={`activity-toggle ${isOnlineMode ? 'active' : ''}`}
                                 onClick={() => {
-                                    // Check if API key exists in localStorage but not in props
-                                    const localStorageApiKey = localStorage.getItem('aud-io-openrouter-key');
-                                    const hasApiKey = openRouterApiKey || localStorageApiKey;
-                                    
                                     if (isOnlineMode) {
                                         // Switching to OFFLINE: auto-select a local model if currently using openrouter
                                         if (selectedModel?.source === 'openrouter' && localModels.length > 0) {
@@ -1141,39 +1413,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                         return;
                                     }
 
-                                    if (!isOnlineMode && !hasApiKey) {
-                                        // No API key — open the portal modal.
-                                        // Callbacks are stored in refs so they stay current.
-                                        orOnKeySavedRef.current = (newKey) => { onOpenRouterApiKeyChange?.(newKey); };
-                                        orOnCompleteRef.current = () => {
-                                            if (selectedModel?.source === 'local' && openRouterModels.length > 0) {
-                                                onSelectedModelChange?.({
-                                                    id: openRouterModels[0].id,
-                                                    name: openRouterModels[0].name,
-                                                    source: 'openrouter',
-                                                });
-                                            }
-                                            onToggleOnlineMode?.(true);
-                                        };
-                                        setOrModalStep('choice');
-                                    } else {
-                                        // Switching to ONLINE with existing API key
-                                        if (!openRouterApiKey && localStorage.getItem('aud-io-openrouter-key')) {
-                                            const storedKey = localStorage.getItem('aud-io-openrouter-key');
-                                            if (storedKey) {
-                                                onOpenRouterApiKeyChange?.(storedKey);
-                                            }
-                                        }
-                                        // Auto-select an OpenRouter model if currently using local
-                                        if (selectedModel?.source === 'local' && openRouterModels.length > 0) {
-                                            onSelectedModelChange?.({
-                                                id: openRouterModels[0].id,
-                                                name: openRouterModels[0].name,
-                                                source: 'openrouter'
-                                            });
-                                        }
-                                        onToggleOnlineMode?.(true);
+                                    // Switching to ONLINE — no popup; API key is handled inside
+                                    // the chat input dropdown when the user tries to use a model.
+                                    if (!openRouterApiKey && localStorage.getItem('aud-io-openrouter-key')) {
+                                        const storedKey = localStorage.getItem('aud-io-openrouter-key');
+                                        if (storedKey) onOpenRouterApiKeyChange?.(storedKey);
                                     }
+                                    if (selectedModel?.source === 'local' && openRouterModels.length > 0) {
+                                        onSelectedModelChange?.({
+                                            id: openRouterModels[0].id,
+                                            name: openRouterModels[0].name,
+                                            source: 'openrouter'
+                                        });
+                                    }
+                                    onToggleOnlineMode?.(true);
                                 }}
                                 title={isOnlineMode ? 'Switch to offline mode (local model)' : 'Switch to online mode (web search + APIs)'}
                                 style={{ width: '36px', height: '20px', borderRadius: '10px' }}
@@ -1236,7 +1489,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             <div className={`chat-body${!hasMessages ? ' welcome-mode' : ''}`}>
 
             {/* Messages Area */}
-            <main className="chat-messages">
+            <main className="chat-messages" ref={chatMessagesRef} onScroll={handleChatScroll}>
                 <div className="chat-messages-container">
                     {/* Welcome Screen */}
                     {!hasMessages && (
@@ -1245,7 +1498,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 <svg width="32" height="32" viewBox="0 0 40 40" fill="none" className="chat-welcome-logo-inline">
                                     <polygon points="20,4 36,36 4,36" stroke="currentColor" strokeWidth="2.5" fill="none" strokeLinejoin="round" />
                                 </svg>
-                                <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>|</span> Chat Interface
+                                Offline | Chat Interface
                             </h1>
                             <p className="chat-welcome-subtitle">Ask anything to get started</p>
 
@@ -1256,11 +1509,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     {messages.filter(m => m.role !== 'system').map((msg, idx) => {
                         if (msg.role === 'user') {
                             const { text, fileNames } = parseUserMessage(msg.content);
+                            const isEditing = editingMsgIdx === idx;
                             return (
                                 <div key={idx} className="message-wrapper user">
                                     <div className="message-user-group">
-                                        {/* File attachment cards — shown above the message bubble, like Perplexity/DeepSeek */}
-                                        {fileNames.length > 0 && (
+                                        {/* File attachment cards — shown above the bubble when not editing */}
+                                        {!isEditing && fileNames.length > 0 && (
                                             <div className="message-file-cards">
                                                 {fileNames.map((name, i) => (
                                                     <div key={i} className="message-file-card">
@@ -1270,17 +1524,119 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                                 ))}
                                             </div>
                                         )}
-                                        <div className="message-bubble user">
-                                            <MessageContent content={text} role="user" />
-                                        </div>
+
+                                        {isEditing ? (
+                                            /* ── Inline edit mode ── */
+                                            <div className="msg-edit-box">
+                                                <textarea
+                                                    className="msg-edit-textarea"
+                                                    value={editDraft}
+                                                    onChange={e => setEditDraft(e.target.value)}
+                                                    onKeyDown={e => {
+                                                        if (e.key === 'Enter' && !e.shiftKey) {
+                                                            e.preventDefault();
+                                                            if (editDraft.trim()) handleEditSave(idx, editDraft);
+                                                        } else if (e.key === 'Escape') {
+                                                            setEditingMsgIdx(null);
+                                                        }
+                                                    }}
+                                                    autoFocus
+                                                    rows={Math.min(8, Math.max(2, editDraft.split('\n').length + 1))}
+                                                />
+                                                <div className="msg-edit-btns">
+                                                    <button
+                                                        className="msg-edit-cancel"
+                                                        onClick={() => setEditingMsgIdx(null)}
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                    <button
+                                                        className="msg-edit-save"
+                                                        onClick={() => handleEditSave(idx, editDraft)}
+                                                        disabled={!editDraft.trim()}
+                                                    >
+                                                        Send
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            /* ── Normal user bubble ── */
+                                            <>
+                                                <div className="message-bubble user">
+                                                    <MessageContent content={text} role="user" />
+                                                </div>
+                                                {/* Action buttons — visible on hover via CSS */}
+                                                <div className="msg-actions user-actions">
+                                                    <button
+                                                        className="msg-action-btn"
+                                                        title="Copy"
+                                                        onClick={() => copyToClipboard(text)}
+                                                    >
+                                                        <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                                        Copy
+                                                    </button>
+                                                    <button
+                                                        className="msg-action-btn"
+                                                        title="Edit"
+                                                        onClick={() => { setEditingMsgIdx(idx); setEditDraft(text); }}
+                                                    >
+                                                        <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                                                        Edit
+                                                    </button>
+                                                </div>
+                                            </>
+                                        )}
                                     </div>
                                 </div>
                             );
                         }
+                        /* ── Assistant message ── */
                         return (
                             <div key={idx} className="message-wrapper assistant">
                                 <div className="message-content-plain">
                                     <MessageContent content={msg.content} role="assistant" />
+                                </div>
+                                {/* Action buttons — visible on hover via CSS */}
+                                <div className="msg-actions assistant-actions">
+                                    <button
+                                        className="msg-action-btn"
+                                        title="Copy"
+                                        onClick={() => copyToClipboard(msg.content)}
+                                    >
+                                        <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                        Copy
+                                    </button>
+                                    <button
+                                        className="msg-action-btn"
+                                        title="Share"
+                                        onClick={() => setShareModalContent(msg.content)}
+                                    >
+                                        <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+                                        Share
+                                    </button>
+                                    <button
+                                        className="msg-action-btn"
+                                        title="Try Again"
+                                        onClick={() => handleRegenerate(idx)}
+                                        disabled={isLoading}
+                                    >
+                                        <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4"/></svg>
+                                        Try Again
+                                    </button>
+                                    <button
+                                        className={`msg-action-btn${likedMsgs.has(idx) ? ' active-like' : ''}`}
+                                        title="Like"
+                                        onClick={() => toggleLike(idx)}
+                                    >
+                                        <svg width="15" height="15" fill={likedMsgs.has(idx) ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>
+                                    </button>
+                                    <button
+                                        className={`msg-action-btn${dislikedMsgs.has(idx) ? ' active-dislike' : ''}`}
+                                        title="Dislike"
+                                        onClick={() => toggleDislike(idx)}
+                                    >
+                                        <svg width="15" height="15" fill={dislikedMsgs.has(idx) ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"/><path d="M17 2h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/></svg>
+                                    </button>
                                 </div>
                             </div>
                         );
@@ -1301,18 +1657,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
             {/* Input Bar - no footer compartment */}
             <div className="chat-input-bar" style={{ position: 'relative' }}>
-                {/* Model Prompt Banner — in welcome mode this is ordered BELOW the form via CSS */}
-                {showModelPromptBanner && (
-                    <div className="model-prompt-banner-wrapper">
-                        <ModelPromptBanner
-                            isOnlineMode={isOnlineMode}
-                            hasApiKey={!!(openRouterApiKey || localStorage.getItem('aud-io-openrouter-key'))}
-                            hasLocalModel={hasOfflineCapability}
-                            onOpenModels={(focusApiKey = false, focusHfToken = false) => onOpenModels?.(focusApiKey, focusHfToken)}
-                            onToggleOnlineMode={onToggleOnlineMode}
-                        />
-                    </div>
-                )}
                 {/* Attachment Tray - above input box */}
                 {(attachedFiles.length > 0 || localFileAttachments.length > 0) && (
                     <div className="attachment-tray-above-input">
@@ -1323,7 +1667,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 {file.size_bytes != null && (
                                     <span className="attachment-size">{formatFileSize(file.size_bytes)}</span>
                                 )}
-                                <button type="button" className="attachment-remove" onClick={() => handleRemoveFile(file.name)}>
+                                <button type="button" className="attachment-remove" onClick={() => handleRemoveFile(file.file_path!)}>
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><path d="M18 6L6 18M6 6l12 12" /></svg>
                                 </button>
                             </div>
@@ -1345,16 +1689,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 )}
                 <form onSubmit={handleSubmit} className="chat-input-form">
                     <div className="chat-input-pill">
-                        <button
-                            type="button"
-                            className="input-icon-btn"
-                            onClick={handleFileUpload}
-                            title="Attach file"
-                        >
-                            <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                            </svg>
-                        </button>
                         {/* Curated files picker button — always visible, opens picker panel */}
                         <button
                             type="button"
@@ -1370,13 +1704,23 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                             </svg>
                         </button>
+                        <button
+                            type="button"
+                            className="input-icon-btn"
+                            onClick={handleFileUpload}
+                            title="Attach file"
+                        >
+                            <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                            </svg>
+                        </button>
                         <div style={{ position: 'relative', flex: 1 }}>
                             <input
                                 ref={inputRef}
                                 value={input}
                                 onChange={handleInputChange}
                                 onKeyDown={handleInputKeyDown}
-                                placeholder="Ask anything (type @ for adding local storage files)"
+                                placeholder="Type @ to attach files or ask anything..."
                                 className="chat-input"
                             />
                             {/* @filename autocomplete dropdown — curated files only */}
@@ -1438,16 +1782,261 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 </div>
                             )}
                         </div>
-                        <button type="submit" disabled={isLoading || !input.trim()} className="input-send-btn">
-                            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
-                            </svg>
-                        </button>
-                    </div>
-                    <p className="chat-disclaimer">AI can make mistakes. Please verify important information.</p>
-                </form>
-            </div>
-            {/* End chat-body */}
+                        {/* Model Selector Capsule - Input Area */}
+                        {isOnlineMode ? (
+                            openRouterModels.length > 0 && (
+                                <div style={{ position: 'relative' }} ref={chatInputModelDropdownRef}>
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsChatInputModelDropdownOpen(!isChatInputModelDropdownOpen)}
+                                        style={{
+                                            display: 'flex', alignItems: 'center', gap: '4px',
+                                            padding: '6px 10px', borderRadius: '9999px',
+                                            backgroundColor: 'var(--bg-tertiary)',
+                                            border: '1px solid var(--border-primary)',
+                                            color: 'var(--text-primary)', fontSize: '12px',
+                                            cursor: 'pointer', whiteSpace: 'nowrap',
+                                            height: 'fit-content', alignSelf: 'center',
+                                            marginRight: '6px'
+                                        }}
+                                        title={`Current model: ${selectedModel?.name || 'None'}`}
+                                    >
+                                        <span style={{
+                                            width: '6px', height: '6px', borderRadius: '50%',
+                                            backgroundColor: hasOnlineCapability ? '#22C55E' : '#B91C1C',
+                                            boxShadow: hasOnlineCapability ? '0 0 6px rgba(34,197,94,0.7)' : '0 0 6px rgba(239,68,68,0.65)',
+                                        }} />
+                                        {selectedModel && selectedModel.name && selectedModel.name.length > 15 ? selectedModel.name.substring(0, 15) + '...' : selectedModel?.name || 'Select'}
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                        </svg>
+                                    </button>
+                                    {isChatInputModelDropdownOpen && (
+                                        <div className="dropdown-menu" style={{ bottom: '100%', marginBottom: '8px', top: 'auto', minWidth: '220px', maxHeight: '300px', overflowY: 'auto' }}>
+                                            {(() => {
+                                                const hasOpenRouterKey = openRouterApiKey || localStorage.getItem('aud-io-openrouter-key');
+                                                if (!hasOpenRouterKey) {
+                                                    return (
+                                                        <div style={{ padding: '16px 12px', textAlign: 'center' }}>
+                                                            <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                                                No OpenRouter API key found.
+                                                            </p>
+                                                            <button
+                                                                onClick={() => {
+                                                                    setIsChatInputModelDropdownOpen(false);
+                                                                    orOnKeySavedRef.current = (newKey) => { onOpenRouterApiKeyChange?.(newKey); };
+                                                                    orOnCompleteRef.current = null;
+                                                                    setOrModalStep('choice');
+                                                                }}
+                                                                style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: 'var(--text-primary)', color: 'var(--bg-primary)', border: '1px solid var(--text-primary)', cursor: 'pointer', fontWeight: 500 }}
+                                                            >
+                                                                Add OpenRouter Key
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                }
+                                                return (
+                                                    <>
+                                                        <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-primary)' }}>
+                                                            APIs
+                                                        </div>
+                                                        {openRouterModels.slice(0, 5).map((model) => (
+                                                            <button
+                                                                key={model.id}
+                                                                className="dropdown-item"
+                                                                style={{
+                                                                    fontSize: '12px',
+                                                                    padding: '6px 12px',
+                                                                    borderRadius: '4px',
+                                                                    backgroundColor: selectedModel?.id === model.id ? 'var(--bg-tertiary)' : 'transparent',
+                                                                    color: selectedModel?.id === model.id ? 'var(--text-primary)' : 'var(--text-secondary)',
+                                                                    border: 'none',
+                                                                    cursor: 'pointer',
+                                                                    textAlign: 'left',
+                                                                    width: '100%',
+                                                                    marginBottom: '2px'
+                                                                }}
+                                                                onClick={() => {
+                                                                    onSelectedModelChange?.({ id: model.id, name: model.name, source: 'openrouter', pricing: model.pricing });
+                                                                    setIsChatInputModelDropdownOpen(false);
+                                                                }}
+                                                            >
+                                                                {model.name}
+                                                            </button>
+                                                        ))}
+                                                    </>
+                                                );
+                                            })()}
+                                        </div>
+                                    )}
+                                </div>
+                            )
+                        ) : (
+                            // OFFLINE MODE — always show capsule, dropdown shows local or available HF models.
+                            // Clicking an installed model selects it inline (no navigation).
+                            // Clicking a downloadable model shows a download confirmation dialog.
+                            // No HF token → opens HF token modal inline (no navigation).
+                            <div style={{ position: 'relative' }} ref={chatInputModelDropdownRef}>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsChatInputModelDropdownOpen(!isChatInputModelDropdownOpen)}
+                                    style={{
+                                        display: 'flex', alignItems: 'center', gap: '4px',
+                                        padding: '6px 10px', borderRadius: '9999px',
+                                        backgroundColor: 'var(--bg-tertiary)',
+                                        border: '1px solid var(--border-primary)',
+                                        color: 'var(--text-primary)', fontSize: '12px',
+                                        cursor: 'pointer', whiteSpace: 'nowrap',
+                                        height: 'fit-content', alignSelf: 'center',
+                                        marginRight: '6px'
+                                    }}
+                                    title={isModelActivating ? 'Model is loading, please wait…' : localModels.length > 0 ? `Current model: ${selectedModel?.name || 'None'}` : 'Download Models'}
+                                >
+                                    <span style={{
+                                        width: '6px', height: '6px', borderRadius: '50%',
+                                        backgroundColor: isModelActivating ? '#F59E0B' : hasOfflineCapability ? '#22C55E' : '#B91C1C',
+                                        boxShadow: isModelActivating ? '0 0 6px rgba(245,158,11,0.7)' : hasOfflineCapability ? '0 0 6px rgba(34,197,94,0.7)' : '0 0 6px rgba(239,68,68,0.65)',
+                                        animation: isModelActivating ? 'pulse 1s ease-in-out infinite' : 'none',
+                                    }} />
+                                    {isModelActivating
+                                        ? 'Activating…'
+                                        : localModels.length > 0
+                                            ? (selectedModel && selectedModel.name && selectedModel.name.length > 15 ? selectedModel.name.substring(0, 15) + '...' : selectedModel?.name || 'Select')
+                                            : 'Download Models'}
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                    </svg>
+                                </button>
+                                {isChatInputModelDropdownOpen && (
+                                    <div className="dropdown-menu" style={{ bottom: '100%', marginBottom: '8px', top: 'auto', minWidth: '280px', maxHeight: '350px', overflowY: 'auto' }}>
+                                        {localModels.length > 0 ? (
+                                            // ── Installed models: select inline, no navigation ──
+                                            <>
+                                                <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-primary)' }}>
+                                                    Available on device
+                                                </div>
+                                                {localModels.slice(0, 5).map((model) => (
+                                                    <button
+                                                        key={model.id}
+                                                        className="dropdown-item"
+                                                        style={{
+                                                            fontSize: '12px',
+                                                            padding: '6px 12px',
+                                                            borderRadius: '4px',
+                                                            backgroundColor: selectedModel?.id === model.id ? 'var(--bg-tertiary)' : 'transparent',
+                                                            color: selectedModel?.id === model.id ? 'var(--text-primary)' : 'var(--text-secondary)',
+                                                            border: 'none',
+                                                            cursor: 'pointer',
+                                                            textAlign: 'left',
+                                                            width: '100%',
+                                                            marginBottom: '2px'
+                                                        }}
+                                                        onClick={() => {
+                                                            // Select the model immediately — no navigation needed
+                                                            onSelectedModelChange?.({ id: model.id, name: model.name, source: 'local' });
+                                                            setIsChatInputModelDropdownOpen(false);
+                                                        }}
+                                                    >
+                                                        {model.name}
+                                                    </button>
+                                                ))}
+                                            </>
+                                        ) : (
+                                            // ── No installed models ──
+                                            (() => {
+                                                const hasHfKey = hfToken || localStorage.getItem('aud-io-hf-token');
+                                                if (!hasHfKey) {
+                                                    // No HF token → prompt user to add one inline
+                                                    return (
+                                                        <div style={{ padding: '12px', textAlign: 'center' }}>
+                                                            <p style={{ margin: '0 0 8px 0', fontSize: '12px', color: 'var(--text-secondary)' }}>No offline models installed.</p>
+                                                            <p style={{ margin: '0 0 12px 0', fontSize: '11px', color: 'var(--text-muted)' }}>Add a HuggingFace token to download models.</p>
+                                                            <button
+                                                                onClick={() => {
+                                                                    setIsChatInputModelDropdownOpen(false);
+                                                                    setHfModalStep('choice');
+                                                                }}
+                                                                style={{ fontSize: '12px', padding: '6px 16px', borderRadius: '9999px', backgroundColor: 'var(--text-primary)', color: 'var(--bg-primary)', border: '1px solid var(--text-primary)', cursor: 'pointer', fontWeight: 500 }}
+                                                            >
+                                                                Add HuggingFace Token
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                }
+                                                // HF token present → show downloadable models with confirmation
+                                                return (
+                                                    <>
+                                                        <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-primary)' }}>
+                                                            Available to Download
+                                                        </div>
+                                                        {availableHfModels.slice(0, 5).map((model) => (
+                                                            <button
+                                                                key={model.id}
+                                                                className="dropdown-item"
+                                                                style={{
+                                                                    fontSize: '12px',
+                                                                    padding: '6px 12px',
+                                                                    borderRadius: '4px',
+                                                                    backgroundColor: 'transparent',
+                                                                    color: 'var(--text-secondary)',
+                                                                    border: 'none',
+                                                                    cursor: 'pointer',
+                                                                    textAlign: 'left',
+                                                                    width: '100%',
+                                                                    marginBottom: '2px'
+                                                                }}
+                                                                onClick={() => {
+                                                                    // Show confirmation instead of navigating away
+                                                                    setIsChatInputModelDropdownOpen(false);
+                                                                    setDownloadConfirm({ id: model.id, name: model.name });
+                                                                }}
+                                                            >
+                                                                {model.name}
+                                                            </button>
+                                                        ))}
+                                                        {availableHfModels.length > 5 && (
+                                                            <div style={{ padding: '8px 12px', borderTop: '1px solid var(--bg-tertiary)', marginTop: '4px' }}>
+                                                                <button
+                                                                    onClick={() => {
+                                                                        setIsChatInputModelDropdownOpen(false);
+                                                                        onOpenModels?.();
+                                                                    }}
+                                                                    style={{ display: 'block', width: '100%', padding: '7px 0', fontSize: '12px', fontWeight: 500, color: 'var(--bg-primary)', background: 'var(--text-primary)', border: 'none', borderRadius: '9999px', cursor: 'pointer', textAlign: 'center' }}
+                                                                >
+                                                                    Browse Models
+                                                                </button>
+                                                            </div>
+                                                        )}
+                                                    </>
+                                                );
+                                            })()
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                            <button type="submit" disabled={isLoading || isModelActivating || !input.trim()} className="input-send-btn">
+                                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                                </svg>
+                            </button>
+                        </div>
+                        <p className="chat-disclaimer">Be inspired! AI can make mistakes, Always verify.</p>
+                    </form>
+                    {/* Model Prompt Banner — always below the disclaimer */}
+                    {showModelPromptBanner && (
+                        <div className="model-prompt-banner-wrapper">
+                            <ModelPromptBanner
+                                isOnlineMode={isOnlineMode}
+                                hasApiKey={!!(openRouterApiKey || localStorage.getItem('aud-io-openrouter-key'))}
+                                hasLocalModel={hasOfflineCapability}
+                                onOpenModels={(focusApiKey = false, focusHfToken = false) => onOpenModels?.(focusApiKey, focusHfToken)}
+                                onToggleOnlineMode={onToggleOnlineMode}
+                            />
+                        </div>
+                    )}
+                </div>
+                {/* End chat-body */}
             </div>
 
             {/* Delete Confirmation Modal */}
@@ -1497,25 +2086,25 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.55)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000, fontFamily: 'sans-serif' }}
                     onClick={(e) => { if (e.target === e.currentTarget) closeOrModal(); }}
                 >
-                    <div style={{ background: 'white', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'black', position: 'relative' }}>
+                    <div style={{ background: 'var(--bg-modal)', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'var(--text-primary)', position: 'relative' }}>
                         {/* Close */}
-                        <button onClick={closeOrModal} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
+                        <button onClick={closeOrModal} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
                         {orModalStep === 'choice' && (
                             <>
-                                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 12, textAlign: 'center', fontSize: 18 }}>OpenRouter API Key Needed</h3>
-                                <p style={{ color: '#374151', textAlign: 'center', fontSize: 14, marginBottom: 20 }}>Access powerful AI models by adding your OpenRouter API key.</p>
+                                <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 12, textAlign: 'center', fontSize: 18 }}>OpenRouter API Key Needed</h3>
+                                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: 14, marginBottom: 20 }}>Access powerful AI models by adding your OpenRouter API key.</p>
                                 <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
                                     <button
-                                        onClick={() => { openInBrowser('https://openrouter.ai/keys'); closeOrModal(); }}
-                                        style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
-                                        onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
-                                        onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                                        onClick={() => { openInBrowser('https://openrouter.ai/keys'); setOrModalStep('input'); }}
+                                        style={{ width: '42%', padding: '10px 16px', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-primary)', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                                        onMouseOver={(e) => { e.currentTarget.style.background = 'var(--text-primary)'; e.currentTarget.style.color = 'var(--bg-modal)'; }}
+                                        onMouseOut={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
                                     >Create API Key</button>
                                     <button
                                         onClick={() => setOrModalStep('input')}
-                                        style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
-                                        onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
-                                        onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                                        style={{ width: '42%', padding: '10px 16px', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-primary)', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                                        onMouseOver={(e) => { e.currentTarget.style.background = 'var(--text-primary)'; e.currentTarget.style.color = 'var(--bg-modal)'; }}
+                                        onMouseOut={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
                                     >Enter Existing Key</button>
                                 </div>
                             </>
@@ -1523,9 +2112,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         {orModalStep === 'input' && (
                             <>
                                 {/* Back */}
-                                <button onClick={() => setOrModalStep('choice')} style={{ position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>←</button>
-                                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 10, textAlign: 'center', fontSize: 18 }}>Enter OpenRouter API Key</h3>
-                                <p style={{ color: '#374151', textAlign: 'center', fontSize: 13, marginBottom: 16 }}>
+                                <button onClick={() => setOrModalStep('choice')} style={{ position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: '50%', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: 'none', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>←</button>
+                                <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 10, textAlign: 'center', fontSize: 18 }}>Enter OpenRouter API Key</h3>
+                                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: 13, marginBottom: 16 }}>
                                     Paste your key below. Get one at{' '}
                                     <a href="#" onClick={(e) => { e.preventDefault(); openInBrowser('https://openrouter.ai/keys'); }} style={{ color: '#2563eb', textDecoration: 'none' }}>openrouter.ai/keys</a>
                                 </p>
@@ -1536,7 +2125,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     value={orKeyInput}
                                     onChange={(e) => setOrKeyInput(e.target.value)}
                                     onKeyDown={(e) => e.key === 'Enter' && saveOrKey()}
-                                    style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${orKeyError ? '#ef4444' : '#d1d5db'}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 6, outline: 'none' }}
+                                    style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${orKeyError ? '#ef4444' : 'var(--border-primary)'}`, background: 'var(--bg-input)', color: 'var(--text-primary)', fontSize: 14, boxSizing: 'border-box', marginBottom: 6, outline: 'none' }}
                                 />
                                 {orKeyInputError && (
                                     <p style={{ color: '#ef4444', fontSize: '12px', marginBottom: 12, textAlign: 'center' }}>{orKeyInputError}</p>
@@ -1552,6 +2141,281 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     </div>
                 </div>,
                 document.body
+            )}
+
+            {/* ── HuggingFace Token Modal (offline mode — chat input dropdown) ── */}
+            {hfModalStep !== 'none' && createPortal(
+                <div
+                    style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.55)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000, fontFamily: 'sans-serif' }}
+                    onClick={(e) => { if (e.target === e.currentTarget) closeHfModal(); }}
+                >
+                    <div style={{ background: 'var(--bg-modal)', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'var(--text-primary)', position: 'relative' }}>
+                        <button onClick={closeHfModal} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
+                        {hfModalStep === 'choice' && (
+                            <>
+                                <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 12, textAlign: 'center', fontSize: 18 }}>HuggingFace Token Needed</h3>
+                                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: 14, marginBottom: 20 }}>A HuggingFace token is required to download offline models.</p>
+                                <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                                    <button
+                                        onClick={() => { openInBrowser('https://huggingface.co/settings/tokens'); setHfModalStep('input'); }}
+                                        style={{ width: '42%', padding: '10px 16px', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-primary)', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                                        onMouseOver={(e) => { e.currentTarget.style.background = 'var(--text-primary)'; e.currentTarget.style.color = 'var(--bg-modal)'; }}
+                                        onMouseOut={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+                                    >Create Token</button>
+                                    <button
+                                        onClick={() => setHfModalStep('input')}
+                                        style={{ width: '42%', padding: '10px 16px', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-primary)', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                                        onMouseOver={(e) => { e.currentTarget.style.background = 'var(--text-primary)'; e.currentTarget.style.color = 'var(--bg-modal)'; }}
+                                        onMouseOut={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+                                    >Enter Existing Token</button>
+                                </div>
+                            </>
+                        )}
+                        {hfModalStep === 'input' && (
+                            <>
+                                <button onClick={() => setHfModalStep('choice')} style={{ position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: '50%', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: 'none', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>←</button>
+                                <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 10, textAlign: 'center', fontSize: 18 }}>Enter HuggingFace Token</h3>
+                                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: 13, marginBottom: 16 }}>
+                                    Paste your token below. Get one at{' '}
+                                    <a href="#" onClick={(e) => { e.preventDefault(); openInBrowser('https://huggingface.co/settings/tokens'); }} style={{ color: '#2563eb', textDecoration: 'none' }}>huggingface.co/settings/tokens</a>
+                                </p>
+                                <input
+                                    ref={hfKeyRef}
+                                    type="password"
+                                    placeholder="hf_..."
+                                    value={hfKeyInput}
+                                    onChange={(e) => setHfKeyInput(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                            const key = hfKeyInput.trim();
+                                            if (!key) { setHfKeyError(true); setTimeout(() => setHfKeyError(false), 1000); return; }
+                                            setHfToken(key);
+                                            closeHfModal();
+                                            hfOnCompleteRef.current?.();
+                                            hfOnCompleteRef.current = null;
+                                        }
+                                    }}
+                                    style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${hfKeyError ? '#ef4444' : 'var(--border-primary)'}`, background: 'var(--bg-input)', color: 'var(--text-primary)', fontSize: 14, boxSizing: 'border-box', marginBottom: 6, outline: 'none' }}
+                                />
+                                {hfKeyInputError && (
+                                    <p style={{ color: '#ef4444', fontSize: '12px', marginBottom: 12, textAlign: 'center' }}>{hfKeyInputError}</p>
+                                )}
+                                <button
+                                    onClick={() => {
+                                        const key = hfKeyInput.trim();
+                                        if (!key) { setHfKeyError(true); setTimeout(() => setHfKeyError(false), 1000); return; }
+                                        setHfToken(key);
+                                        closeHfModal();
+                                        hfOnCompleteRef.current?.();
+                                        hfOnCompleteRef.current = null;
+                                    }}
+                                    style={{ width: '100%', padding: '11px 16px', background: '#000', color: 'white', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}
+                                    onMouseOver={(e) => { e.currentTarget.style.background = '#F59E0B'; }}
+                                    onMouseOut={(e) => { e.currentTarget.style.background = '#000'; }}
+                                >Save Token</button>
+                            </>
+                        )}
+                    </div>
+                </div>,
+                document.body
+            )}
+
+            {/* ── Download Confirmation Modal (offline mode — chat input dropdown) ── */}
+            {downloadConfirm && createPortal(
+                <div
+                    style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.55)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000, fontFamily: 'sans-serif' }}
+                    onClick={(e) => { if (e.target === e.currentTarget) setDownloadConfirm(null); }}
+                >
+                    <div style={{ background: 'white', padding: '28px 24px', borderRadius: '12px', width: '420px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'black', position: 'relative', textAlign: 'center' }}>
+                        <button onClick={() => setDownloadConfirm(null)} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
+                        <div style={{ fontSize: 32, marginBottom: 12 }}>⬇️</div>
+                        <h3 style={{ color: 'black', marginTop: 0, marginBottom: 8, fontSize: 18 }}>Start Download?</h3>
+                        <p style={{ color: '#374151', fontSize: 14, marginBottom: 8 }}>
+                            <strong>{downloadConfirm.name}</strong>
+                        </p>
+                        <p style={{ color: '#6B7280', fontSize: 12, marginBottom: 24 }}>This model will be downloaded in the background. You can monitor progress in the download bubble.</p>
+                        <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                            <button
+                                onClick={() => setDownloadConfirm(null)}
+                                style={{ padding: '10px 24px', background: '#E5E7EB', color: '#374151', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500 }}
+                                onMouseOver={(e) => { e.currentTarget.style.background = '#D1D5DB'; }}
+                                onMouseOut={(e) => { e.currentTarget.style.background = '#E5E7EB'; }}
+                            >Cancel</button>
+                            <button
+                                onClick={() => {
+                                    const { id, name } = downloadConfirm;
+                                    const hasHfKey = hfToken || localStorage.getItem('aud-io-hf-token');
+                                    setDownloadConfirm(null);
+
+                                    if (!hasHfKey) {
+                                        // No HF token — show the token modal first.
+                                        // After the user saves their token, auto-trigger the download.
+                                        hfOnCompleteRef.current = () => {
+                                            if (onDownloadModel) {
+                                                onDownloadModel(id, name);
+                                            } else {
+                                                onOpenModels?.();
+                                            }
+                                        };
+                                        setHfModalStep('choice');
+                                    } else {
+                                        // HF token present — start download immediately.
+                                        if (onDownloadModel) {
+                                            onDownloadModel(id, name);
+                                        } else {
+                                            onOpenModels?.();
+                                        }
+                                    }
+                                }}
+                                style={{ padding: '10px 24px', background: '#F59E0B', color: 'white', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 600 }}
+                                onMouseOver={(e) => { e.currentTarget.style.background = '#D97706'; }}
+                                onMouseOut={(e) => { e.currentTarget.style.background = '#F59E0B'; }}
+                            >Download</button>
+                        </div>
+                    </div>
+                </div>,
+                document.body
+            )}
+
+            {/* OpenRouter error modal — portal to document.body so position:fixed
+                is never clipped by an overflow or transform ancestor */}
+            {openRouterError && createPortal(
+                <OpenRouterErrorCard
+                    errorType={openRouterError.type}
+                    errorMessage={openRouterError.message}
+                    onOpenModels={(focusApiKey?: boolean) => onOpenModels?.(focusApiKey)}
+                    onDismiss={() => setOpenRouterError(null)}
+                />,
+                document.body
+            )}
+
+            {/* Paid model,
+                document.body warning dialog — shows before sending with a paid model */}
+            {showPaidModelWarning && createPortal(
+                <>
+                    <div
+                        onClick={() => setShowPaidModelWarning(false)}
+                        style={{
+                            position: 'fixed',
+                            inset: 0,
+                            backgroundColor: 'rgba(0, 0, 0, 0.45)',
+                            zIndex: 9998,
+                            animation: 'orBackdropFadeIn 0.2s ease-out',
+                        }}
+                    />
+                    <div
+                        role="dialog"
+                        aria-modal="true"
+                        style={{
+                            position: 'fixed',
+                            top: '50%',
+                            left: '50%',
+                            transform: 'translate(-50%, -50%)',
+                            zIndex: 9999,
+                            width: 'min(440px, 90vw)',
+                            backgroundColor: 'var(--bg-modal, var(--bg-secondary))',
+                            border: '1px solid var(--border-primary)',
+                            borderRadius: '16px',
+                            padding: '24px',
+                            boxShadow: '0 8px 40px rgba(0,0,0,0.3)',
+                            animation: 'orModalSlideIn 0.25s ease-out',
+                        }}
+                    >
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '12px', gap: '12px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                <span style={{ fontSize: '24px', lineHeight: 1 }}>💳</span>
+                                <span style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)', lineHeight: '1.3' }}>
+                                    Credits Required
+                                </span>
+                            </div>
+                            <button
+                                onClick={() => setShowPaidModelWarning(false)}
+                                style={{
+                                    background: 'none', border: 'none', cursor: 'pointer',
+                                    padding: '2px 6px', color: 'var(--text-muted)', fontSize: '20px',
+                                    lineHeight: 1, borderRadius: '4px',
+                                }}
+                                title="Dismiss" aria-label="Dismiss"
+                            >
+                                ×
+                            </button>
+                        </div>
+                        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 6px 0', lineHeight: '1.6' }}>
+                            You're about to send a message with <strong style={{ color: 'var(--text-primary)' }}>{selectedModel?.name}</strong>, which is a <strong style={{ color: 'var(--text-primary)' }}>paid model</strong> on OpenRouter.
+                            To use it, your OpenRouter account needs available credits.
+                        </p>
+                        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 20px 0', lineHeight: '1.6' }}>
+                            You can add credits directly on OpenRouter, or switch to one of the free models available in this app — no account or credits needed.
+                        </p>
+                        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                            <button
+                                onClick={() => openInBrowser('https://openrouter.ai/credits')}
+                                style={{
+                                    flex: '1 1 auto',
+                                    minWidth: '140px',
+                                    fontSize: '14px',
+                                    fontWeight: 600,
+                                    padding: '11px 20px',
+                                    borderRadius: '9999px',
+                                    backgroundColor: 'var(--text-primary)',
+                                    color: 'var(--bg-primary)',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                }}
+                            >
+                                Add Credits
+                            </button>
+                            <button
+                                onClick={() => {
+                                    const freeModel = openRouterModels[0];
+                                    if (freeModel) {
+                                        pendingAutoSend.current = true;
+                                        onSelectedModelChange?.({
+                                            id: freeModel.id,
+                                            name: freeModel.name,
+                                            source: 'openrouter',
+                                            pricing: freeModel.pricing,
+                                        });
+                                    }
+                                    setShowPaidModelWarning(false);
+                                }}
+                                style={{
+                                    flex: '1 1 auto',
+                                    minWidth: '140px',
+                                    fontSize: '14px',
+                                    fontWeight: 600,
+                                    padding: '11px 20px',
+                                    borderRadius: '9999px',
+                                    backgroundColor: 'transparent',
+                                    color: 'var(--text-secondary)',
+                                    border: '1px solid var(--border-primary)',
+                                    cursor: 'pointer',
+                                }}
+                            >
+                                Switch to Free Model
+                            </button>
+                        </div>
+                    </div>
+                    <style>{`
+                        @keyframes orBackdropFadeIn {
+                            from { opacity: 0; }
+                            to   { opacity: 1; }
+                        }
+                        @keyframes orModalSlideIn {
+                            from { opacity: 0; transform: translate(-50%, calc(-50% - 16px)); }
+                            to   { opacity: 1; transform: translate(-50%, -50%); }
+                        }
+                    `}</style>
+                </>,
+                document.body
+            )}
+
+            {/* Share modal */}
+            {shareModalContent !== null && (
+                <ShareModal
+                    content={shareModalContent}
+                    onClose={() => setShareModalContent(null)}
+                />
             )}
         </div>
     );

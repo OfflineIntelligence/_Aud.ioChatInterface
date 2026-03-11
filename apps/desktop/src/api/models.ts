@@ -95,3 +95,127 @@ export function toSimpleModelList(models: ModelInfo[]): Array<{ id: string; name
     name: model.name,
   }));
 }
+
+// ── Interrupted download persistence ────────────────────────────────────────
+// Saved to localStorage so the user can resume after closing mid-download.
+const INTERRUPTED_STORAGE_KEY = 'aud-io-interrupted-downloads';
+
+export interface InterruptedDownload {
+  model_id: string;
+  model_name: string;
+  /** Pre-built source payload as expected by /models/install */
+  source: unknown;
+  size_bytes: number;
+  format?: string;
+  description?: string;
+  interrupted_at: string; // ISO timestamp
+}
+
+export function saveInterruptedDownload(download: Omit<InterruptedDownload, 'interrupted_at'>): void {
+  try {
+    const stored = localStorage.getItem(INTERRUPTED_STORAGE_KEY);
+    const map: Record<string, InterruptedDownload> = stored ? JSON.parse(stored) : {};
+    map[download.model_id] = { ...download, interrupted_at: new Date().toISOString() };
+    localStorage.setItem(INTERRUPTED_STORAGE_KEY, JSON.stringify(map));
+  } catch { /* ignore */ }
+}
+
+export function removeInterruptedDownload(modelNameOrId: string): void {
+  try {
+    const stored = localStorage.getItem(INTERRUPTED_STORAGE_KEY);
+    if (!stored) return;
+    const map: Record<string, InterruptedDownload> = JSON.parse(stored);
+    // Try exact model_id key first, then fallback to searching by model_name
+    if (map[modelNameOrId]) {
+      delete map[modelNameOrId];
+    } else {
+      const key = Object.keys(map).find(k => map[k].model_name === modelNameOrId);
+      if (key) delete map[key];
+    }
+    localStorage.setItem(INTERRUPTED_STORAGE_KEY, JSON.stringify(map));
+  } catch { /* ignore */ }
+}
+
+export function getInterruptedDownloads(): InterruptedDownload[] {
+  try {
+    const stored = localStorage.getItem(INTERRUPTED_STORAGE_KEY);
+    if (!stored) return [];
+    return Object.values(JSON.parse(stored) as Record<string, InterruptedDownload>);
+  } catch { return []; }
+}
+
+/**
+ * Re-issue a download for a previously interrupted model.
+ * Uses the pre-built source payload saved at initial download time.
+ */
+export async function resumeDownload(download: InterruptedDownload): Promise<boolean> {
+  try {
+    const hfToken = localStorage.getItem('aud-io-hf-token') || undefined;
+    const response = await fetch(`${getApiBaseSync()}/models/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model_id: download.model_id,
+        model_name: download.model_name,
+        source: download.source,
+        size_bytes: download.size_bytes,
+        format: download.format,
+        description: download.description,
+        hf_token: hfToken,
+      }),
+    });
+    return response.ok;
+  } catch { return false; }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Initiate a background model download via POST /models/install.
+ * Mirrors the logic in ModelsPanel.handleInstallModel() but as a standalone
+ * API helper so ChatWindow (or any component) can trigger downloads without
+ * coupling to ModelsPanel internals.
+ *
+ * @param modelId   The model's id (e.g., "meta-llama/Llama-3-8B-Instruct-GGUF")
+ * @param modelName Human-readable name shown in notifications
+ * @returns true if the backend accepted the request, false otherwise
+ */
+export async function downloadModel(
+  modelId: string,
+  modelName: string
+): Promise<boolean> {
+  try {
+    const hfToken = localStorage.getItem('aud-io-hf-token') || undefined;
+
+    // Build the source payload — same logic as buildSourcePayload in ModelsPanel
+    let source: unknown;
+    if (modelId.startsWith('ollama:')) {
+      source = { type: 'Ollama', model_name: modelId.slice(7) };
+    } else if (modelId.startsWith('openrouter:')) {
+      source = { type: 'OpenRouter', model_id: modelId.slice(11) };
+    } else {
+      // Default: HuggingFace GGUF
+      const parts = modelId.split('/');
+      const filename =
+        parts.length > 1
+          ? `${parts[parts.length - 1].toLowerCase().replace(/-gguf$/i, '')}.Q4_K_M.gguf`
+          : `${modelId}.gguf`;
+      source = { type: 'HuggingFace', repo_id: modelId, filename };
+    }
+
+    const response = await fetch(`${getApiBaseSync()}/models/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model_id: modelId,
+        model_name: modelName,
+        source,
+        hf_token: hfToken,
+      }),
+    });
+
+    return response.ok;
+  } catch (error) {
+    console.error('Failed to start model download:', error);
+    return false;
+  }
+}

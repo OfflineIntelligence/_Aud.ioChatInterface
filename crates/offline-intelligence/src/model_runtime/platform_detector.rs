@@ -170,9 +170,7 @@ impl HardwareCapabilities {
     }
 
     fn detect_vulkan_support() -> bool {
-        // Check for vulkan libraries or validation layers
-        // This is a simplified check - in practice, you'd want to check for the actual Vulkan loader
-        false // For now, default to false until properly implemented
+        false
     }
 
     /// Get the appropriate runtime binary path based on platform and hardware.

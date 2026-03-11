@@ -112,42 +112,12 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
                     shared_state.engine_available.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(false) => {
-                    info!("⬇️  No engine found - downloading now (blocking)...");
-                    shared_state.engine_manager = Some(engine_manager_arc.clone());
+                    // No engine binary found.  Do NOT block here — the port must be
+                    // bound quickly so main.rs doesn't time out.  The user can
+                    // download an engine from the Models page after the app opens.
+                    info!("⏳ No engine found — starting in online-only mode. Download from the Models page.");
+                    shared_state.engine_manager = Some(engine_manager_arc);
                     shared_state.engine_available.store(false, std::sync::atomic::Ordering::Relaxed);
-                    
-                    // BLOCK here until engine is downloaded (with timeout)
-                    let download_timeout = 300u64; // 5 minutes max
-                    let start_time = std::time::Instant::now();
-                    let check_interval = 5u64; // Check every 5 seconds
-                    
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(check_interval)).await;
-                        
-                        match engine_manager_arc.ensure_engine_available().await {
-                            Ok(true) => {
-                                info!("✅ Engine downloaded successfully!");
-                                shared_state.engine_available.store(true, std::sync::atomic::Ordering::Relaxed);
-                                break;
-                            }
-                            Ok(false) => {
-                                let elapsed = start_time.elapsed().as_secs();
-                                if elapsed >= download_timeout {
-                                    error!("❌ Engine download timed out after {} seconds", elapsed);
-                                    break;
-                                }
-                                info!("⏳ Engine download in progress... ({}s elapsed)", elapsed);
-                            }
-                            Err(e) => {
-                                let elapsed = start_time.elapsed().as_secs();
-                                if elapsed >= download_timeout {
-                                    error!("❌ Engine download failed after {} seconds: {}", elapsed, e);
-                                    break;
-                                }
-                                warn!("⚠️  Engine download retry: {}", e);
-                            }
-                        }
-                    }
                 }
                 Err(e) => {
                     warn!("⚠️  Engine manager scan failed: {}", e);
@@ -254,6 +224,15 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
         let cfg_bg = cfg.clone();
         let memory_database_bg = memory_database.clone();
         tokio::spawn(async move {
+            // ── Mark initialization complete IMMEDIATELY ──────────────────────────
+            // The health endpoint now returns "degraded" right away (init done, no
+            // model loaded yet). The frontend LoadingScreen accepts "degraded" and
+            // opens the app; the local model auto-load continues in the background.
+            // This must be the very first statement so the ~100 ms polling window
+            // in LoadingScreen.tsx resolves on the first tick after axum starts.
+            shared_state_bg.mark_initialization_complete();
+            info!("✅ Backend marked as initialized — frontend may proceed");
+
             // Context orchestrator (may query DB but is quick)
             let context_orchestrator = match crate::context_engine::create_default_orchestrator(
                 memory_database_bg,
@@ -395,8 +374,6 @@ pub async fn run_thread_server(cfg: Config, port_tx: Option<std::sync::mpsc::Sen
                 info!("⏳ No engine found - starting in online-only mode");
             }
 
-            // Signal health endpoint: backend is now fully initialized
-            shared_state_bg.mark_initialization_complete();
             info!("✅ Background initialization complete");
         });
     }
@@ -501,6 +478,15 @@ fn build_compatible_router(mut state: UnifiedAppState) -> axum::Router {
     };
     use std::time::Duration;
 
+    // Allow any origin in all builds.
+    //
+    // Rationale: this server only ever binds to 127.0.0.1 (localhost), so it is
+    // unreachable from any remote host.  The WebView origin varies by platform
+    // and Tauri version (tauri://localhost, http://localhost, null, etc.).
+    // Restricting to a hard-coded origin silently breaks all fetch() calls when
+    // the actual origin doesn't match — the root cause of the 135-second loading
+    // screen hang.  Security is provided by Tauri's capability / CSP layer, not
+    // by CORS headers on a local-only server.
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT, axum::http::Method::DELETE])
@@ -598,6 +584,11 @@ fn build_compatible_router(mut state: UnifiedAppState) -> axum::Router {
         .route("/models/preferences", post(crate::api::model_api::update_preferences))
         .route("/models/refresh", post(crate::api::model_api::refresh_models))
         .route("/models/switch", post(crate::api::model_api::switch_model))
+        // Phase A: HF gated model access check
+        .route("/models/hf/access", get(crate::api::model_api::check_hf_access))
+        // Phase B: Full OpenRouter catalog (paginated + filtered) and quota
+        .route("/models/openrouter/catalog", get(crate::api::model_api::openrouter_catalog))
+        .route("/models/openrouter/quota", get(crate::api::model_api::openrouter_quota))
         .route("/hardware/recommendations", get(crate::api::model_api::get_hardware_recommendations))
         .route("/hardware/info", get(crate::api::model_api::get_hardware_info))
         .route("/metrics/system", get(crate::api::model_api::get_system_metrics))

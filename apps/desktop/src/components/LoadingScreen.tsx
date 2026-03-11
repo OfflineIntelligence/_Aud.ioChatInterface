@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { getApiBase } from '../api/backendUrl';
 import './LoadingScreen.css';
 
@@ -15,12 +15,16 @@ export function LoadingScreen({ children }: LoadingScreenProps) {
   const [error, setError] = useState<string | null>(null);
   const [onlineMode, setOnlineMode] = useState(false);
   const [debugInfo, setDebugInfo] = useState<string>('');
+  // Ref so the setInterval closure always reads the latest attempt count
+  // without stale closure issues (useState value would be captured at creation time).
+  const attemptsRef = useRef(0);
 
   const startHealthCheck = (isRetry: boolean = false) => {
     if (isRetry) {
       setStage('checking');
       setError(null);
       setAttempts(0);
+      attemptsRef.current = 0;
     }
 
     let interval: ReturnType<typeof setInterval> | null = null;
@@ -87,17 +91,19 @@ export function LoadingScreen({ children }: LoadingScreenProps) {
             }
           }
 
-          setAttempts(prev => prev + 1);
+          attemptsRef.current += 1;
+          setAttempts(attemptsRef.current);
 
-          // Update stage based on attempts
-          if (attempts < 30) {
+          // Use the ref so the stage transition is accurate even inside the closure.
+          if (attemptsRef.current < 30) {
             setStage('initializing-engine');
           } else {
             setStage('starting-backend');
           }
         } catch (fetchError) {
           console.error('[LoadingScreen] Fetch error:', fetchError);
-          setAttempts(prev => prev + 1);
+          attemptsRef.current += 1;
+          setAttempts(attemptsRef.current);
         }
       };
 
@@ -177,7 +183,7 @@ export function LoadingScreen({ children }: LoadingScreenProps) {
     <div className="loading-screen">
       <div className="loading-content">
         <div className="spinner"></div>
-        <h2>Aud.io</h2>
+        <h2>_Offline | Chat Interface</h2>
 
         {stage === 'checking' && (
           <p className="loading-text">

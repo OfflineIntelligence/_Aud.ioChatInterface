@@ -1,41 +1,36 @@
 // Notification Component
-// Displays modern bubble-style notifications in the bottom-right corner
+// Futuristic B&W notifications with #b07dce / #f5c2e7 accent traces
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNotifications, type Notification } from '../contexts/NotificationContext';
 import { X, CheckCircle, AlertCircle, AlertTriangle, Info, Download } from 'lucide-react';
 
-// Notification type configuration
+// Per-type accent colours — everything else is B&W via CSS vars
 const notificationConfig = {
   success: {
     icon: CheckCircle,
-    bgGradient: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-    iconBg: 'rgba(255, 255, 255, 0.2)',
-    accentColor: '#10b981',
+    accentBar: 'linear-gradient(180deg, #b07dce 0%, #f5c2e7 100%)',
+    iconColor: '#b07dce',
   },
   error: {
     icon: AlertCircle,
-    bgGradient: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
-    iconBg: 'rgba(255, 255, 255, 0.2)',
-    accentColor: '#ef4444',
+    accentBar: 'var(--text-primary)',
+    iconColor: 'var(--text-primary)',
   },
   warning: {
     icon: AlertTriangle,
-    bgGradient: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
-    iconBg: 'rgba(255, 255, 255, 0.2)',
-    accentColor: '#f59e0b',
+    accentBar: '#f5c2e7',
+    iconColor: '#b07dce',
   },
   info: {
     icon: Info,
-    bgGradient: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
-    iconBg: 'rgba(255, 255, 255, 0.2)',
-    accentColor: '#3b82f6',
+    accentBar: '#b07dce',
+    iconColor: '#b07dce',
   },
   download: {
     icon: Download,
-    bgGradient: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
-    iconBg: 'rgba(255, 255, 255, 0.2)',
-    accentColor: '#8b5cf6',
+    accentBar: 'linear-gradient(180deg, #b07dce 0%, #f5c2e7 100%)',
+    iconColor: '#b07dce',
   },
 };
 
@@ -54,29 +49,24 @@ const NotificationBubble: React.FC<{
     }, 300);
   }, [notification.id, onDismiss]);
 
-  // Animate in on mount
   useEffect(() => {
     const timer = setTimeout(() => setIsVisible(true), 50);
     return () => clearTimeout(timer);
   }, []);
 
-  // Handle auto-dismiss with progress bar
   useEffect(() => {
     if (notification.duration && notification.duration > 0) {
       const startTime = Date.now();
       const duration = notification.duration;
-
       const progressInterval = setInterval(() => {
         const elapsed = Date.now() - startTime;
         const remaining = Math.max(0, 100 - (elapsed / duration) * 100);
         setProgress(remaining);
-
         if (remaining <= 0) {
           clearInterval(progressInterval);
           handleClose();
         }
       }, 50);
-
       return () => clearInterval(progressInterval);
     }
   }, [notification.duration, handleClose]);
@@ -88,73 +78,63 @@ const NotificationBubble: React.FC<{
     <div
       style={{
         position: 'relative',
-        width: '340px',
-        marginBottom: '12px',
-        borderRadius: '16px',
-        background: 'rgba(47, 47, 47, 0.75)',
-        backdropFilter: 'blur(20px) saturate(180%)',
-        WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-        border: '1px solid rgba(255, 255, 255, 0.1)',
-        boxShadow: '0 20px 60px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05)',
+        width: '320px',
+        marginBottom: '10px',
+        borderRadius: '12px',
+        background: 'var(--bg-secondary)',
+        border: '1px solid var(--border-primary)',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.15), 0 2px 8px rgba(0,0,0,0.08)',
         overflow: 'hidden',
         transform: isVisible && !isExiting
           ? 'translateX(0) scale(1)'
           : isExiting
-            ? 'translateX(120%) scale(0.9)'
-            : 'translateX(100%) scale(0.9)',
+            ? 'translateX(110%) scale(0.95)'
+            : 'translateX(100%) scale(0.95)',
         opacity: isVisible && !isExiting ? 1 : 0,
-        transition: 'all 0.35s cubic-bezier(0.4, 0, 0.2, 1)',
+        transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
         cursor: 'pointer',
       }}
       onClick={handleClose}
     >
-      {/* Accent bar on left */}
-      <div
-        style={{
-          position: 'absolute',
-          left: 0,
-          top: 0,
-          bottom: 0,
-          width: '4px',
-          background: config.bgGradient,
-          borderRadius: '16px 0 0 16px',
-        }}
-      />
+      {/* Left accent stripe */}
+      <div style={{
+        position: 'absolute',
+        left: 0, top: 0, bottom: 0,
+        width: '3px',
+        background: config.accentBar,
+        borderRadius: '12px 0 0 12px',
+      }} />
 
-      {/* Content */}
-      <div style={{ padding: '14px 14px 14px 18px', display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
-        {/* Icon container */}
-        <div
-          style={{
-            width: '36px',
-            height: '36px',
-            borderRadius: '10px',
-            background: config.bgGradient,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-            boxShadow: `0 4px 12px ${config.accentColor}40`,
-          }}
-        >
-          <Icon size={18} color="white" strokeWidth={2.5} />
+      {/* Content row */}
+      <div style={{ padding: '12px 12px 12px 16px', display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+
+        {/* Icon — small, borderless, just coloured */}
+        <div style={{
+          width: '32px', height: '32px', flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          borderRadius: '8px',
+          background: 'var(--bg-tertiary)',
+          border: '1px solid var(--border-primary)',
+        }}>
+          <Icon size={15} color={config.iconColor} strokeWidth={2} />
         </div>
 
-        {/* Text content */}
+        {/* Text */}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{
             fontWeight: 600,
-            fontSize: '14px',
+            fontSize: '13px',
             color: 'var(--text-primary)',
-            marginBottom: '4px',
+            marginBottom: '2px',
             lineHeight: 1.3,
+            letterSpacing: '0.01em',
           }}>
             {notification.title}
           </div>
           <div style={{
-            fontSize: '13px',
+            fontSize: '12px',
             color: 'var(--text-secondary)',
-            lineHeight: 1.4,
+            lineHeight: 1.45,
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             display: '-webkit-box',
@@ -164,68 +144,83 @@ const NotificationBubble: React.FC<{
             {notification.message}
           </div>
           <div style={{
-            fontSize: '11px',
+            fontSize: '10px',
             color: 'var(--text-muted)',
-            marginTop: '6px',
+            marginTop: '5px',
+            letterSpacing: '0.04em',
+            textTransform: 'uppercase',
+            fontWeight: 500,
           }}>
             {notification.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </div>
+          {notification.actions && notification.actions.length > 0 && (
+            <div style={{ display: 'flex', gap: '6px', marginTop: '8px', flexWrap: 'wrap' }}
+              onClick={e => e.stopPropagation()}>
+              {notification.actions.map((action, i) => (
+                <button
+                  key={i}
+                  onClick={(e) => { e.stopPropagation(); action.onClick(); handleClose(); }}
+                  style={{
+                    padding: '4px 12px',
+                    borderRadius: '9999px',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    border: '1px solid var(--border-primary)',
+                    background: action.isPrimary ? 'var(--text-primary)' : 'transparent',
+                    color: action.isPrimary ? 'var(--bg-primary)' : 'var(--text-secondary)',
+                    transition: 'opacity 0.15s',
+                    letterSpacing: '0.02em',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.opacity = '0.75'; }}
+                  onMouseLeave={e => { e.currentTarget.style.opacity = '1'; }}
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Close button */}
         <button
-          onClick={(e) => {
-            e.stopPropagation();
-            handleClose();
-          }}
+          onClick={(e) => { e.stopPropagation(); handleClose(); }}
           style={{
-            background: 'rgba(255, 255, 255, 0.05)',
-            border: 'none',
-            borderRadius: '8px',
-            width: '28px',
-            height: '28px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
+            background: 'transparent',
+            border: '1px solid var(--border-primary)',
+            borderRadius: '6px',
+            width: '24px', height: '24px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
             cursor: 'pointer',
             color: 'var(--text-muted)',
             flexShrink: 0,
-            transition: 'all 0.2s ease',
+            transition: 'all 0.15s ease',
           }}
           onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)';
+            e.currentTarget.style.background = 'var(--bg-tertiary)';
             e.currentTarget.style.color = 'var(--text-primary)';
           }}
           onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
+            e.currentTarget.style.background = 'transparent';
             e.currentTarget.style.color = 'var(--text-muted)';
           }}
         >
-          <X size={14} strokeWidth={2.5} />
+          <X size={12} strokeWidth={2.5} />
         </button>
       </div>
 
-      {/* Progress bar */}
+      {/* Progress bar — uses accent colour */}
       {notification.duration && notification.duration > 0 && (
-        <div
-          style={{
-            position: 'absolute',
-            bottom: 0,
-            left: 0,
-            right: 0,
-            height: '3px',
-            background: 'var(--bg-tertiary)',
-          }}
-        >
-          <div
-            style={{
-              height: '100%',
-              width: `${progress}%`,
-              background: config.bgGradient,
-              transition: 'width 0.1s linear',
-              borderRadius: '0 2px 2px 0',
-            }}
-          />
+        <div style={{
+          position: 'absolute', bottom: 0, left: 0, right: 0,
+          height: '2px', background: 'var(--bg-tertiary)',
+        }}>
+          <div style={{
+            height: '100%',
+            width: `${progress}%`,
+            background: config.accentBar,
+            transition: 'width 0.1s linear',
+          }} />
         </div>
       )}
     </div>
@@ -236,29 +231,24 @@ const NotificationsContainer: React.FC = () => {
   const { notifications, removeNotification } = useNotifications();
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        top: '16px',
-        right: '24px',
-        zIndex: 9999,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'flex-end',
-        gap: '8px',
-        pointerEvents: 'none',
-        maxHeight: 'calc(100vh - 32px)',
-        overflowY: 'auto',
-        overflowX: 'visible',
-        scrollbarWidth: 'none',
-      }}
-    >
+    <div style={{
+      position: 'fixed',
+      top: '16px',
+      right: '20px',
+      zIndex: 9999,
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'flex-end',
+      gap: '6px',
+      pointerEvents: 'none',
+      maxHeight: 'calc(100vh - 32px)',
+      overflowY: 'auto',
+      overflowX: 'visible',
+      scrollbarWidth: 'none',
+    }}>
       {notifications.map((notification) => (
         <div key={notification.id} style={{ pointerEvents: 'auto' }}>
-          <NotificationBubble
-            notification={notification}
-            onDismiss={removeNotification}
-          />
+          <NotificationBubble notification={notification} onDismiss={removeNotification} />
         </div>
       ))}
     </div>

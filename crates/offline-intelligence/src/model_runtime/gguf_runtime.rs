@@ -101,7 +101,6 @@ impl GGUFRuntime {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
-        // Capture stdout/stderr for logging
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -122,6 +121,7 @@ impl GGUFRuntime {
         let mut last_log_secs: u64 = 0;
         loop {
             sleep(Duration::from_millis(delay_ms)).await;
+
             if self.is_ready().await {
                 info!("✅ GGUF runtime ready after {:.1}s", _start.elapsed().as_secs_f64());
                 return Ok(());
@@ -137,7 +137,7 @@ impl GGUFRuntime {
             delay_ms = (delay_ms * 2).min(2_000);
         }
 
-        Err(anyhow::anyhow!("llama-server failed to start within 120 seconds"))
+        Err(anyhow::anyhow!("llama-server failed to become ready within 120 seconds"))
     }
 
     /// Send SIGTERM to the child process (Unix only) and wait up to
@@ -205,7 +205,15 @@ impl ModelRuntime for GGUFRuntime {
         }
 
         let health_url = format!("{}/health", self.base_url);
-        match self.http_client.get(&health_url).send().await {
+        // Use a short per-request timeout for health probes so that the
+        // /healthz handler never blocks longer than 3 s even if llama-server
+        // is in a degraded/hung state (e.g. orphan process from a previous run).
+        match self.http_client
+            .get(&health_url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+        {
             Ok(resp) => resp.status().is_success(),
             Err(_) => false,
         }
@@ -345,7 +353,9 @@ impl ModelRuntime for GGUFRuntime {
             // Give it up to 3 s before escalating to SIGKILL.
             #[cfg(unix)]
             {
-                let exited_gracefully = Self::send_sigterm_and_wait(&mut child, 3);
+                // 1 s grace (was 3 s) — enough for llama-server to flush its Metal/CUDA
+                // contexts; any longer only adds latency to model switching.
+                let exited_gracefully = Self::send_sigterm_and_wait(&mut child, 1);
                 if exited_gracefully {
                     info!("llama-server shut down gracefully after SIGTERM");
                     return Ok(());

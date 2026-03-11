@@ -163,20 +163,38 @@ impl RuntimeManager {
 
     /// Shutdown current runtime (atomic replacement)
     pub async fn shutdown(&self) -> anyhow::Result<()> {
-        // Atomically replace with empty holder
+        // Atomically replace with empty holder so new load() calls see no runtime.
         let old_holder = self.holder.swap(Arc::new(RuntimeHolder {
             runtime: None,
             config: None,
         }));
 
-        // Shutdown the old runtime outside the critical section
-        // Try to get exclusive ownership; if not possible (arc still referenced), skip shutdown
-        if let Ok(mut holder) = Arc::try_unwrap(old_holder) {
-            if let Some(mut runtime) = holder.runtime.take() {
-                info!("Shutting down runtime");
-                runtime.shutdown().await?;
+        // Retry Arc::try_unwrap up to 10 times (100 ms total).
+        // ArcSwap load() guards are held for nanoseconds; any concurrent caller
+        // that loaded old_holder just before the swap above will have dropped its
+        // guard by the second or third attempt at most.
+        let mut attempt = old_holder;
+        for i in 0..10u8 {
+            match Arc::try_unwrap(attempt) {
+                Ok(mut holder) => {
+                    if let Some(mut runtime) = holder.runtime.take() {
+                        info!("Shutting down runtime (attempt {})", i + 1);
+                        runtime.shutdown().await?;
+                    }
+                    return Ok(());
+                }
+                Err(arc) => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    attempt = arc;
+                }
             }
         }
+        // Could not get exclusive ownership — the process is exiting anyway
+        // (std::process::exit(0) in the ExitRequested handler terminates everything).
+        tracing::warn!(
+            "RuntimeManager::shutdown: could not acquire exclusive Arc ownership after 10 retries. \
+             llama-server will be killed by the OS on process exit."
+        );
 
         Ok(())
     }

@@ -11,8 +11,9 @@
   --bg-hover: #2f2f2f;
   --bg-chat: #212121;
   --bg-input: #303030;
-  --bg-bubble-user: #2563eb;
+  --bg-bubble-user: #424242;
   --bg-bubble-assistant: transparent;
+  --text-bubble-user: #ececec;
   --bg-code: #1e1e1e;
   --bg-code-header: #2d2d2d;
   --bg-overlay: rgba(0, 0, 0, 0.6);
@@ -42,8 +43,9 @@
   --bg-hover: #f0f0f0;
   --bg-chat: #ffffff;
   --bg-input: #ffffff;
-  --bg-bubble-user: #2563eb;
+  --bg-bubble-user: #e8e8e8;
   --bg-bubble-assistant: transparent;
+  --text-bubble-user: #1f1f1f;
   --bg-code: #1e1e1e;
   --bg-code-header: #2d2d2d;
   --bg-overlay: rgba(0, 0, 0, 0.5);
@@ -475,22 +477,13 @@
 }
 
 /* In welcome mode: make the input bar a flex-column so we can reorder its children.
-   Form (order 1) appears first, banner (order 2) appears below it. */
+   Banner always renders after the form (below disclaimer) now, so no ordering hack needed. */
 .chat-body.welcome-mode .chat-input-bar {
   display: flex;
   flex-direction: column;
 }
 
-.chat-body.welcome-mode .model-prompt-banner-wrapper {
-  order: 2;
-}
-
-.chat-body.welcome-mode .attachment-tray-above-input {
-  order: 0;
-}
-
 .chat-body.welcome-mode .chat-input-form {
-  order: 1;
   width: 100%; /* flex-item shrinks to content width without this */
 }
 
@@ -753,9 +746,13 @@ dark .capsule-btn-gray:hover {
 }
 
 /* Messages */
-.message-wrapper { display: flex; margin-bottom: 24px; }
-.message-wrapper.user { justify-content: flex-end; }
-.message-wrapper.assistant { justify-content: flex-start; }
+.message-wrapper {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 28px;
+}
+.message-wrapper.user { align-items: flex-end; }
+.message-wrapper.assistant { align-items: flex-start; }
 
 .message-user-group {
   display: flex;
@@ -766,17 +763,121 @@ dark .capsule-btn-gray:hover {
 }
 
 .message-bubble.user {
-  padding: 14px 18px;
-  border-radius: 18px;
+  padding: 12px 18px;
+  border-radius: 18px 18px 4px 18px;
   background-color: var(--bg-bubble-user);
-  color: var(--text-on-primary);
+  color: var(--text-bubble-user);
+  font-size: 14px;
+  line-height: 1.6;
 }
 
+/* ChatGPT-style assistant: full-width text, no bubble background */
 .message-content-plain {
   max-width: 85%;
   padding: 4px 0;
   color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.7;
 }
+
+/* ── Message action buttons ─────────────────────────────────────────── */
+.msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  margin-top: 6px;
+}
+.message-wrapper:hover .msg-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.user-actions { justify-content: flex-end; }
+.assistant-actions { justify-content: flex-start; }
+
+.msg-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 5px 8px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.msg-action-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+.msg-action-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.msg-action-btn.active-like  { color: #22c55e; }
+.msg-action-btn.active-dislike { color: #ef4444; }
+
+/* ── Inline edit box (user message edit mode) ──────────────────────── */
+.msg-edit-box {
+  width: min(520px, 80vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.msg-edit-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border-radius: 14px;
+  border: 2px solid var(--bg-bubble-user);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.6;
+  font-family: inherit;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.msg-edit-textarea:focus {
+  border-color: var(--bg-bubble-user);
+  box-shadow: 0 0 0 3px rgba(37,99,235,0.15);
+}
+.msg-edit-btns {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.msg-edit-cancel, .msg-edit-save {
+  padding: 8px 18px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: opacity 0.15s;
+}
+.msg-edit-cancel {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-primary) !important;
+}
+.msg-edit-save {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+}
+.msg-edit-save:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.msg-edit-cancel:hover, .msg-edit-save:not(:disabled):hover { opacity: 0.8; }
 
 /* File attachment cards — displayed above the user message bubble (outside it) */
 .message-file-cards {
@@ -912,7 +1013,7 @@ dark .capsule-btn-gray:hover {
   min-width: 0;
 }
 
-.chat-input::placeholder { color: var(--text-muted); }
+.chat-input::placeholder { color: var(--text-muted); font-size: 15px; }
 
 /* @filename Autocomplete Dropdown */
 .file-autocomplete-dropdown {
@@ -981,7 +1082,7 @@ dark .capsule-btn-gray:hover {
   flex-wrap: wrap;
   gap: 6px;
   padding: 6px 0 10px;
-  justify-content: flex-start;
+  justify-content: flex-end;
   max-width: 1229px;
   margin-left: auto;
   margin-right: auto;
@@ -1788,6 +1889,11 @@ dark .capsule-btn-gray:hover {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(1.4); }
 }
 
 /* ═══════════════════════════════════════════════════

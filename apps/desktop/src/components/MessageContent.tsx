@@ -104,7 +104,7 @@ const MessageContent: React.FC<MessageContentProps> = ({ content, role }) => {
     // Strip both the file contents block and the [Attached files: ...] marker from display
     let displayText = content;
     // Remove "--- ATTACHED FILE CONTENTS ---" block
-    displayText = displayText.replace(/\n?\n?--- ATTACHED FILE CONTENTS ---[\s\S]*?--- END OF ATTACHMENTS---\n?/g, '');
+    displayText = displayText.replace(/\n?\n?--- ATTACHED FILE CONTENTS ---[\s\S]*?--- END OF ATTACHMENTS ---\n?/g, '');
     // Remove "[Attached files: ...]" marker
     displayText = displayText.replace(/\n?\[Attached files: [^\]]+\]$/, '').trim();
     return (

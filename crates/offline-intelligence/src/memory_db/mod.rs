@@ -10,6 +10,7 @@ pub mod local_files_store;
 pub mod all_files_store;
 pub mod api_keys_store;
 pub mod users_store;
+pub mod session_file_contexts_store;
 
 // Re-export commonly used types
 pub use schema::*;
@@ -21,6 +22,7 @@ pub use local_files_store::{LocalFilesStore, LocalFile, LocalFileTree};
 pub use all_files_store::{AllFilesStore, AllFile, AllFileTree};
 pub use api_keys_store::{ApiKeysStore, ApiKeyType, ApiKeyRecord, Encryption};
 pub use users_store::{UsersStore, User};
+pub use session_file_contexts_store::{SessionFileContextsStore, SessionFileContext, AttachmentRef};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -39,6 +41,7 @@ pub struct MemoryDatabase {
     pub all_files: AllFilesStore,
     pub api_keys: ApiKeysStore,
     pub users: UsersStore,
+    pub session_file_contexts: SessionFileContextsStore,
     pool: Arc<Pool<SqliteConnectionManager>>,
 }
 
@@ -134,6 +137,7 @@ impl MemoryDatabase {
             all_files: AllFilesStore::new(Arc::clone(&pool), all_files_dir),
             api_keys,
             users,
+            session_file_contexts: SessionFileContextsStore::new(Arc::clone(&pool)),
             pool,
         })
     }
@@ -180,6 +184,7 @@ impl MemoryDatabase {
             all_files: AllFilesStore::new(Arc::clone(&pool), all_files_dir),
             api_keys,
             users,
+            session_file_contexts: SessionFileContextsStore::new(Arc::clone(&pool)),
             pool,
         })
     }

@@ -12,12 +12,14 @@ pub mod downloader;
 pub mod storage;
 pub mod recommendation;
 pub mod progress;
+pub mod hf_access;
 
-pub use registry::{ModelRegistry, ModelInfo, ModelStatus};
+pub use registry::{ModelRegistry, ModelInfo, ModelPricing, ModelStatus};
 pub use downloader::{ModelDownloader, DownloadSource};
 pub use storage::{ModelStorage, StorageLocation};
 pub use recommendation::ModelRecommender;
 pub use progress::{DownloadProgress, ProgressTracker};
+pub use hf_access::{check_hf_gated_access, HfAccessStatus};
 
 use anyhow::Result;
 use std::sync::Arc;

@@ -71,7 +71,7 @@ interface HardwareInfoResponse {
 }
 
 // Static components extracted outside render to prevent state resets
-const ProgressBar: React.FC<{ percent: number; color?: string; label?: string }> = ({ percent, color = 'var(--accent)', label }) => (
+const ProgressBar: React.FC<{ percent: number; color?: string; label?: string }> = ({ percent, color = 'var(--text-primary)', label }) => (
   <div>
     <div style={{ width: '100%', height: '8px', backgroundColor: 'var(--bg-tertiary)', borderRadius: '4px', overflow: 'hidden' }}>
       <div style={{ width: `${Math.min(Math.max(percent, 0), 100)}%`, height: '100%', backgroundColor: color, borderRadius: '4px', transition: 'width 0.5s ease' }} />
@@ -91,7 +91,7 @@ const MetricCard: React.FC<{ title: string; icon: React.ReactNode; badge?: strin
       {badge && (
         <span style={{
           fontSize: '10px', padding: '2px 6px', borderRadius: '4px',
-          backgroundColor: badgeColor || 'var(--bg-tertiary)', color: 'white', fontWeight: 600,
+          backgroundColor: badgeColor || 'var(--bg-tertiary)', color: 'var(--bg-primary)', fontWeight: 600,
         }}>{badge}</span>
       )}
     </div>
@@ -271,9 +271,9 @@ const MetricsPanel: React.FC<{
               {/* Inference Device Banner */}
               <MetricCard
                 title="Inference Configuration"
-                icon={<Zap size={18} style={{ color: '#f59e0b' }} />}
+                icon={<Zap size={18} style={{ color: 'var(--text-primary)' }} />}
                 badge={metrics.inference.device}
-                badgeColor={metrics.inference.device === 'GPU' ? '#10b981' : metrics.inference.device === 'CPU+GPU' ? '#6366F1' : '#64748B'}
+                badgeColor={'var(--text-primary)'}
               >
                 <div style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.6' }}>
                   {metrics.inference.device === 'GPU' && (
@@ -292,7 +292,7 @@ const MetricsPanel: React.FC<{
               </MetricCard>
 
               {/* CPU */}
-              <MetricCard title="CPU" icon={<Cpu size={18} style={{ color: 'var(--accent)' }} />}>
+              <MetricCard title="CPU" icon={<Cpu size={18} style={{ color: 'var(--text-primary)' }} />}>
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
                   {metrics.cpu.model_name}{metrics.cpu.frequency_mhz > 0 ? ` @ ${(metrics.cpu.frequency_mhz / 1000).toFixed(1)} GHz` : ''}
                 </div>
@@ -307,14 +307,14 @@ const MetricsPanel: React.FC<{
                 {metrics.cpu.per_core_usage.length > 0 && metrics.cpu.per_core_usage.length <= 32 && (
                   <div style={{ marginTop: '10px' }}>
                     <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '6px' }}>Per-core usage</div>
-                    <div style={{ display: 'flex', gap: '2px', flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', gap: '2px', flexWrap: 'wrap', justifyContent: 'center' }}>
                       {metrics.cpu.per_core_usage.map((usage, i) => (
                         <div key={i} title={`Core ${i}: ${usage.toFixed(1)}%`} style={{
                           width: metrics.cpu.per_core_usage.length > 16 ? '8px' : '14px',
                           height: '20px',
                           borderRadius: '2px',
-                          backgroundColor: usage > 80 ? '#ef4444' : usage > 50 ? '#f59e0b' : usage > 10 ? 'var(--accent)' : 'var(--bg-tertiary)',
-                          opacity: Math.max(0.3, usage / 100),
+                          backgroundColor: 'var(--text-primary)',
+                          opacity: Math.max(0.15, usage / 100),
                           transition: 'all 0.3s',
                         }} />
                       ))}
@@ -324,7 +324,7 @@ const MetricsPanel: React.FC<{
               </MetricCard>
 
               {/* GPU */}
-              <MetricCard title="GPU" icon={<Cpu size={18} style={{ color: '#10b981' }} />}>
+              <MetricCard title="GPU" icon={<Cpu size={18} style={{ color: 'var(--text-primary)' }} />}>
                 {metrics.gpu.available ? (
                   <>
                     <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>{metrics.gpu.name}</div>
@@ -335,13 +335,13 @@ const MetricsPanel: React.FC<{
                         {metrics.gpu.usage_percent.toFixed(1)}%
                       </span>
                     </div>
-                    <ProgressBar percent={metrics.gpu.usage_percent} color="#10b981" />
+                    <ProgressBar percent={metrics.gpu.usage_percent} />
                     {/* VRAM */}
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '6px', marginTop: '10px' }}>
                       <span>VRAM: {metrics.gpu.vram_used_gb.toFixed(1)} / {metrics.gpu.vram_total_gb.toFixed(1)} GB</span>
                       <span>{vramPercent.toFixed(1)}%</span>
                     </div>
-                    <ProgressBar percent={vramPercent} color="#059669" />
+                    <ProgressBar percent={vramPercent} />
                     {metrics.gpu.temperature_c > 0 && (
                       <div style={{ fontSize: '12px', color: metrics.gpu.temperature_c > 85 ? '#ef4444' : 'var(--text-muted)', marginTop: '6px' }}>
                         Temperature: {metrics.gpu.temperature_c.toFixed(0)}°C
@@ -361,26 +361,26 @@ const MetricsPanel: React.FC<{
               </MetricCard>
 
               {/* Memory */}
-              <MetricCard title="Memory (RAM)" icon={<Database size={18} style={{ color: '#f59e0b' }} />}>
+              <MetricCard title="Memory (RAM)" icon={<Database size={18} style={{ color: 'var(--text-primary)' }} />}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '6px' }}>
                   <span>{metrics.memory.used_gb.toFixed(1)} / {metrics.memory.total_gb.toFixed(1)} GB</span>
                   <span style={{ fontWeight: 600, color: metrics.memory.usage_percent > 90 ? '#ef4444' : 'var(--text-primary)' }}>
                     {metrics.memory.usage_percent.toFixed(1)}%
                   </span>
                 </div>
-                <ProgressBar percent={metrics.memory.usage_percent} color="#f59e0b" />
+                <ProgressBar percent={metrics.memory.usage_percent} />
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
                   {metrics.memory.available_gb.toFixed(1)} GB available
                 </div>
               </MetricCard>
 
               {/* Storage */}
-              <MetricCard title="Storage" icon={<HardDrive size={18} style={{ color: '#8b5cf6' }} />}>
+              <MetricCard title="Storage" icon={<HardDrive size={18} style={{ color: 'var(--text-primary)' }} />}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '6px' }}>
                   <span>{metrics.storage.used_gb.toFixed(1)} / {(metrics.storage.total_gb).toFixed(1)} GB</span>
                   <span>{metrics.storage.available_gb.toFixed(1)} GB free</span>
                 </div>
-                <ProgressBar percent={metrics.storage.total_gb > 0 ? (metrics.storage.used_gb / metrics.storage.total_gb) * 100 : 0} color="#8b5cf6" />
+                <ProgressBar percent={metrics.storage.total_gb > 0 ? (metrics.storage.used_gb / metrics.storage.total_gb) * 100 : 0} />
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
                   Models: {metrics.storage.models_size_gb.toFixed(2)} GB
                 </div>

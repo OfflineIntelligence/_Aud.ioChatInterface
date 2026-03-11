@@ -22,175 +22,125 @@ const FeedbackPopup: React.FC<FeedbackPopupProps> = ({ isOpen, onClose, onSucces
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!feedback.trim()) {
-      setError('Please enter your feedback');
-      return;
-    }
-
+    if (!feedback.trim()) { setError('Please enter your feedback'); return; }
     setIsSubmitting(true);
     setError('');
-
     try {
       const response = await fetch(`${getApiBaseSync()}/feedback`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          message: `Name: ${name}\nEmail: ${email}\n\nFeedback:\n${feedback}`,
-          email: email,
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: `Name: ${name}\nEmail: ${email}\n\nFeedback:\n${feedback}`, email }),
       });
-
       if (response.ok) {
         setIsSubmitted(true);
         onSuccess?.();
         setTimeout(() => {
           onClose();
-          // Reset form after closing
-          setTimeout(() => {
-            setIsSubmitted(false);
-            setFeedback('');
-          }, 300);
+          setTimeout(() => { setIsSubmitted(false); setFeedback(''); }, 300);
         }, 2000);
-      } else {
-        throw new Error('Failed to submit feedback');
-      }
-    } catch (err) {
+      } else { throw new Error('Failed'); }
+    } catch {
       setError('Failed to send feedback. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    padding: '9px 11px',
+    borderRadius: '8px',
+    border: '1px solid var(--border-primary)',
+    background: 'var(--bg-tertiary)',
+    color: 'var(--text-primary)',
+    fontSize: '13px',
+    outline: 'none',
+    transition: 'border-color 0.15s ease',
+    fontFamily: 'inherit',
+    boxSizing: 'border-box',
+  };
+
   return (
-    <div
-      style={{
-        position: 'fixed',
-        top: '50%',
-        right: '24px',
-        transform: 'translateY(-50%)',
-        zIndex: 9999,
-        maxWidth: '380px',
-        width: '100%',
-      }}
-    >
-      <div
-        style={{
-          background: 'rgba(47, 47, 47, 0.85)',
-          backdropFilter: 'blur(20px) saturate(180%)',
-          WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-          borderRadius: '20px',
-          border: '1px solid rgba(255, 255, 255, 0.1)',
-          boxShadow: '0 20px 60px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05)',
-          overflow: 'hidden',
-          animation: 'slideIn 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
-        }}
-      >
+    <div style={{
+      position: 'fixed',
+      top: '50%',
+      right: '24px',
+      transform: 'translateY(-50%)',
+      zIndex: 9999,
+      maxWidth: '360px',
+      width: '100%',
+    }}>
+      <div style={{
+        background: 'var(--bg-secondary)',
+        borderRadius: '16px',
+        border: '1px solid var(--border-primary)',
+        boxShadow: '0 16px 48px rgba(0,0,0,0.18), 0 4px 12px rgba(0,0,0,0.08)',
+        overflow: 'hidden',
+        animation: 'feedbackSlideIn 0.35s cubic-bezier(0.4, 0, 0.2, 1)',
+      }}>
+
         {/* Header */}
-        <div
-          style={{
-            padding: '16px 20px',
-            borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            background: 'rgba(255, 255, 255, 0.03)',
-          }}
-        >
+        <div style={{
+          padding: '14px 16px',
+          borderBottom: '1px solid var(--border-primary)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          background: 'var(--bg-tertiary)',
+        }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div
-              style={{
-                width: '32px',
-                height: '32px',
-                borderRadius: '10px',
-                background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                boxShadow: '0 4px 12px rgba(37, 99, 235, 0.3)',
-              }}
-            >
-              <MessageSquare size={16} color="white" />
+            <div style={{
+              width: '30px', height: '30px',
+              borderRadius: '8px',
+              background: 'var(--bg-primary)',
+              border: '1px solid var(--border-primary)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <MessageSquare size={14} color="var(--text-primary)" />
             </div>
             <div>
-              <h3
-                style={{
-                  fontSize: '15px',
-                  fontWeight: 600,
-                  color: 'var(--text-primary)',
-                  margin: 0,
-                }}
-              >
+              <h3 style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', margin: 0, letterSpacing: '0.01em' }}>
                 We value your feedback!
               </h3>
-              <p
-                style={{
-                  fontSize: '12px',
-                  color: 'var(--text-secondary)',
-                  margin: '2px 0 0 0',
-                }}
-              >
+              <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: '1px 0 0 0' }}>
                 Help us improve Aud.io
               </p>
             </div>
           </div>
+
           <button
             onClick={onClose}
             style={{
-              background: 'rgba(255, 255, 255, 0.05)',
-              border: 'none',
-              borderRadius: '8px',
-              width: '28px',
-              height: '28px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
+              background: 'transparent',
+              border: '1px solid var(--border-primary)',
+              borderRadius: '6px',
+              width: '26px', height: '26px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
               cursor: 'pointer',
               color: 'var(--text-muted)',
-              transition: 'all 0.2s',
+              transition: 'all 0.15s',
             }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)';
-              e.currentTarget.style.color = 'var(--text-primary)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
-              e.currentTarget.style.color = 'var(--text-muted)';
-            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-primary)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-muted)'; }}
           >
-            <X size={16} />
+            <X size={14} />
           </button>
         </div>
 
-        {/* Content */}
-        <div style={{ padding: '20px' }}>
+        {/* Body */}
+        <div style={{ padding: '16px' }}>
           {isSubmitted ? (
             <div style={{ textAlign: 'center', padding: '20px 0' }}>
-              <div
-                style={{
-                  width: '48px',
-                  height: '48px',
-                  borderRadius: '50%',
-                  background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  margin: '0 auto 16px',
-                  boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3)',
-                }}
-              >
-                <Send size={24} color="white" />
+              <div style={{
+                width: '44px', height: '44px', borderRadius: '50%',
+                background: 'var(--bg-tertiary)',
+                border: '1px solid var(--border-primary)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 14px',
+              }}>
+                <Send size={20} color="var(--text-primary)" />
               </div>
-              <h4
-                style={{
-                  fontSize: '16px',
-                  fontWeight: 600,
-                  color: 'var(--text-primary)',
-                  marginBottom: '6px',
-                }}
-              >
+              <h4 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '6px' }}>
                 Thank you!
               </h4>
               <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
@@ -199,17 +149,9 @@ const FeedbackPopup: React.FC<FeedbackPopupProps> = ({ isOpen, onClose, onSucces
             </div>
           ) : (
             <form onSubmit={handleSubmit}>
-              {/* Name Field */}
-              <div style={{ marginBottom: '12px' }}>
-                <label
-                  style={{
-                    display: 'block',
-                    fontSize: '12px',
-                    fontWeight: 500,
-                    color: 'var(--text-secondary)',
-                    marginBottom: '4px',
-                  }}
-                >
+              {/* Name */}
+              <div style={{ marginBottom: '10px' }}>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                   Name
                 </label>
                 <input
@@ -217,39 +159,15 @@ const FeedbackPopup: React.FC<FeedbackPopupProps> = ({ isOpen, onClose, onSucces
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Your name"
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    borderRadius: '10px',
-                    border: '1px solid rgba(255, 255, 255, 0.1)',
-                    background: 'rgba(0, 0, 0, 0.2)',
-                    color: 'var(--text-primary)',
-                    fontSize: '13px',
-                    outline: 'none',
-                    transition: 'all 0.2s',
-                  }}
-                  onFocus={(e) => {
-                    e.currentTarget.style.borderColor = 'var(--accent)';
-                    e.currentTarget.style.boxShadow = '0 0 0 3px rgba(37, 99, 235, 0.15)';
-                  }}
-                  onBlur={(e) => {
-                    e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.1)';
-                    e.currentTarget.style.boxShadow = 'none';
-                  }}
+                  style={inputStyle}
+                  onFocus={(e) => { e.currentTarget.style.borderColor = 'var(--text-primary)'; }}
+                  onBlur={(e) => { e.currentTarget.style.borderColor = 'var(--border-primary)'; }}
                 />
               </div>
 
-              {/* Email Field */}
-              <div style={{ marginBottom: '12px' }}>
-                <label
-                  style={{
-                    display: 'block',
-                    fontSize: '12px',
-                    fontWeight: 500,
-                    color: 'var(--text-secondary)',
-                    marginBottom: '4px',
-                  }}
-                >
+              {/* Email */}
+              <div style={{ marginBottom: '10px' }}>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                   Email
                 </label>
                 <input
@@ -257,39 +175,15 @@ const FeedbackPopup: React.FC<FeedbackPopupProps> = ({ isOpen, onClose, onSucces
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    borderRadius: '10px',
-                    border: '1px solid rgba(255, 255, 255, 0.1)',
-                    background: 'rgba(0, 0, 0, 0.2)',
-                    color: 'var(--text-primary)',
-                    fontSize: '13px',
-                    outline: 'none',
-                    transition: 'all 0.2s',
-                  }}
-                  onFocus={(e) => {
-                    e.currentTarget.style.borderColor = 'var(--accent)';
-                    e.currentTarget.style.boxShadow = '0 0 0 3px rgba(37, 99, 235, 0.15)';
-                  }}
-                  onBlur={(e) => {
-                    e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.1)';
-                    e.currentTarget.style.boxShadow = 'none';
-                  }}
+                  style={inputStyle}
+                  onFocus={(e) => { e.currentTarget.style.borderColor = 'var(--text-primary)'; }}
+                  onBlur={(e) => { e.currentTarget.style.borderColor = 'var(--border-primary)'; }}
                 />
               </div>
 
-              {/* Feedback Field */}
-              <div style={{ marginBottom: '16px' }}>
-                <label
-                  style={{
-                    display: 'block',
-                    fontSize: '12px',
-                    fontWeight: 500,
-                    color: 'var(--text-secondary)',
-                    marginBottom: '4px',
-                  }}
-                >
+              {/* Feedback */}
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                   Your Feedback *
                 </label>
                 <textarea
@@ -298,99 +192,54 @@ const FeedbackPopup: React.FC<FeedbackPopupProps> = ({ isOpen, onClose, onSucces
                   placeholder="Tell us what you think..."
                   rows={3}
                   style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    borderRadius: '10px',
-                    border: `1px solid ${error ? '#ef4444' : 'rgba(255, 255, 255, 0.1)'}`,
-                    background: 'rgba(0, 0, 0, 0.2)',
-                    color: 'var(--text-primary)',
-                    fontSize: '13px',
-                    outline: 'none',
+                    ...inputStyle,
                     resize: 'none',
-                    transition: 'all 0.2s',
-                    fontFamily: 'inherit',
+                    borderColor: error ? 'var(--danger, #ef4444)' : 'var(--border-primary)',
                   }}
-                  onFocus={(e) => {
-                    if (!error) {
-                      e.currentTarget.style.borderColor = 'var(--accent)';
-                      e.currentTarget.style.boxShadow = '0 0 0 3px rgba(37, 99, 235, 0.15)';
-                    }
-                  }}
-                  onBlur={(e) => {
-                    e.currentTarget.style.borderColor = error ? '#ef4444' : 'rgba(255, 255, 255, 0.1)';
-                    e.currentTarget.style.boxShadow = 'none';
-                  }}
+                  onFocus={(e) => { if (!error) e.currentTarget.style.borderColor = 'var(--text-primary)'; }}
+                  onBlur={(e) => { e.currentTarget.style.borderColor = error ? 'var(--danger, #ef4444)' : 'var(--border-primary)'; }}
                 />
                 {error && (
-                  <span
-                    style={{
-                      fontSize: '11px',
-                      color: '#ef4444',
-                      marginTop: '4px',
-                      display: 'block',
-                    }}
-                  >
+                  <span style={{ fontSize: '11px', color: 'var(--danger, #ef4444)', marginTop: '4px', display: 'block' }}>
                     {error}
                   </span>
                 )}
               </div>
 
-              {/* Submit Button */}
+              {/* Submit */}
               <button
                 type="submit"
                 disabled={isSubmitting}
                 style={{
                   width: '100%',
-                  padding: '12px',
-                  borderRadius: '12px',
-                  border: 'none',
-                  background: isSubmitting
-                    ? 'rgba(255, 255, 255, 0.1)'
-                    : 'linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)',
-                  color: 'white',
-                  fontSize: '14px',
+                  padding: '10px',
+                  borderRadius: '9999px',
+                  border: '1px solid var(--text-primary)',
+                  background: isSubmitting ? 'transparent' : 'var(--text-primary)',
+                  color: isSubmitting ? 'var(--text-muted)' : 'var(--bg-primary)',
+                  fontSize: '13px',
                   fontWeight: 600,
                   cursor: isSubmitting ? 'not-allowed' : 'pointer',
-                  transition: 'all 0.2s',
-                  opacity: isSubmitting ? 0.7 : 1,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '8px',
-                  boxShadow: isSubmitting ? 'none' : '0 4px 16px rgba(37, 99, 235, 0.3)',
+                  transition: 'all 0.15s ease',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '7px',
+                  letterSpacing: '0.01em',
                 }}
-                onMouseEnter={(e) => {
-                  if (!isSubmitting) {
-                    e.currentTarget.style.transform = 'translateY(-1px)';
-                    e.currentTarget.style.boxShadow = '0 6px 20px rgba(37, 99, 235, 0.4)';
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.transform = 'translateY(0)';
-                  e.currentTarget.style.boxShadow = isSubmitting
-                    ? 'none'
-                    : '0 4px 16px rgba(37, 99, 235, 0.3)';
-                }}
+                onMouseEnter={(e) => { if (!isSubmitting) e.currentTarget.style.opacity = '0.85'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
               >
                 {isSubmitting ? (
                   <>
-                    <div
-                      style={{
-                        width: '16px',
-                        height: '16px',
-                        border: '2px solid rgba(255, 255, 255, 0.3)',
-                        borderTop: '2px solid white',
-                        borderRadius: '50%',
-                        animation: 'spin 0.8s linear infinite',
-                      }}
-                    />
+                    <div style={{
+                      width: '14px', height: '14px',
+                      border: '2px solid var(--border-primary)',
+                      borderTop: '2px solid var(--text-primary)',
+                      borderRadius: '50%',
+                      animation: 'feedbackSpin 0.8s linear infinite',
+                    }} />
                     Sending...
                   </>
                 ) : (
-                  <>
-                    <Send size={16} />
-                    Send Feedback
-                  </>
+                  <><Send size={14} /> Send Feedback</>
                 )}
               </button>
             </form>
@@ -399,20 +248,12 @@ const FeedbackPopup: React.FC<FeedbackPopupProps> = ({ isOpen, onClose, onSucces
       </div>
 
       <style>{`
-        @keyframes slideIn {
-          from {
-            opacity: 0;
-            transform: translateY(20px) scale(0.95);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0) scale(1);
-          }
+        @keyframes feedbackSlideIn {
+          from { opacity: 0; transform: translateY(12px) scale(0.97); }
+          to   { opacity: 1; transform: translateY(0)   scale(1);    }
         }
-        @keyframes spin {
-          to {
-            transform: rotate(360deg);
-          }
+        @keyframes feedbackSpin {
+          to { transform: rotate(360deg); }
         }
       `}</style>
     </div>

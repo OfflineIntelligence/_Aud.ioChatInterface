@@ -172,7 +172,6 @@ impl Config {
                 .unwrap_or(20)
         };
 
-        // Auto‑detect context size
         let ctx_size = if env::var("CTX_SIZE").unwrap_or_else(|_| "auto".into()) == "auto" {
             Self::auto_detect_ctx_size(&model_path)
         } else {
@@ -532,17 +531,9 @@ impl Config {
     }
 
     fn auto_detect_threads() -> u32 {
-        let num_cpus = num_cpus::get() as u32;
-        info!("Auto‑detected CPU cores: {}", num_cpus);
-
-        match num_cpus {
-            1..=2 => 1,
-            3..=4 => (num_cpus * 2) / 3,
-            5..=8 => (num_cpus * 3) / 5,
-            9..=16 => num_cpus / 2,
-            17..=32 => (num_cpus * 2) / 5,
-            _ => 16,
-        }
+        let threads = num_cpus::get() as u32;
+        info!("Auto-detected {} CPU cores for inference", threads);
+        threads
     }
 
     fn auto_detect_gpu_layers() -> u32 {
@@ -556,10 +547,10 @@ impl Config {
                             if let Ok(memory) = first_gpu.memory_info() {
                                 let vram_gb = memory.total / 1024 / 1024 / 1024;
                                 let layers = match vram_gb {
-                                    0..=4 => 12,
-                                    5..=8 => 20,
-                                    9..=12 => 32,
-                                    13..=16 => 40,
+                                    0..=4  => 12, // partial offload for small VRAM
+                                    5..=8  => 20, // full 7B Q4 model
+                                    9..=12 => 32, // full 13B Q4 model
+                                    13..=16 => 50,
                                     _ => 50,
                                 };
                                 info!(
@@ -602,10 +593,10 @@ impl Config {
                                             if let Ok(vram_mb) = vram_mb_str.trim().parse::<u64>() {
                                                 let vram_gb = vram_mb / 1024;
                                                 let layers = match vram_gb {
-                                                    0..=4 => 12,
-                                                    5..=8 => 20,
+                                                    0..=4  => 12,
+                                                    5..=8  => 20,
                                                     9..=12 => 32,
-                                                    13..=16 => 40,
+                                                    13..=16 => 50,
                                                     _ => 50,
                                                 };
                                                 info!(
@@ -721,7 +712,6 @@ impl Config {
         system.refresh_memory();
 
         let available_ram_gb = system.available_memory() / 1024 / 1024 / 1024;
-        let _total_ram_gb = system.total_memory() / 1024 / 1024 / 1024;
 
         let required_ram_gb = (inferred_ctx as f32 / 4096.0) * 1.5;
         if available_ram_gb < required_ram_gb as u64 {
@@ -767,7 +757,7 @@ impl Config {
         let limited = batch_size.clamp(16, 1024);
         match ctx_size {
             0..=2048 => limited.min(512),
-            2049..=4096 => limited.min(384),
+            2049..=4096 => limited.min(512),
             4097..=8192 => limited.min(256),
             8193..=16384 => limited.min(128),
             16385..=32768 => limited.min(64),

@@ -26,6 +26,23 @@ pub enum ModelStatus {
     Error(String),
 }
 
+/// Public pricing information for an API model (e.g., OpenRouter).
+/// Both fields are decimal strings; "0" means the model is free.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPricing {
+    /// Cost per prompt token — "0" means free
+    pub prompt: String,
+    /// Cost per completion token — "0" means free
+    pub completion: String,
+}
+
+impl ModelPricing {
+    pub fn is_free(&self) -> bool {
+        (self.prompt == "0" || self.prompt.is_empty())
+            && (self.completion == "0" || self.completion.is_empty())
+    }
+}
+
 /// Information about a model in the registry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -62,6 +79,12 @@ pub struct ModelInfo {
     /// Download count (for HuggingFace models)
     #[serde(default)]
     pub downloads: u64,
+    /// Whether this HuggingFace model requires access approval from the repo owner
+    #[serde(default)]
+    pub is_gated: bool,
+    /// Pricing info for OpenRouter API models (None for offline/HF models)
+    #[serde(default)]
+    pub pricing: Option<ModelPricing>,
 }
 
 /// Model registry manager
@@ -214,20 +237,12 @@ impl ModelRegistry {
         for m in body.data.into_iter() {
             let plain_id = m.id.clone();
 
-            // ── Free-model gate ────────────────────────────────────────────────
-            // Only expose models that are free to use with an API key.
-            // A model is free when:
-            //   • The pricing block says both prompt and completion cost "0", OR
-            //   • The model ID ends with ":free" (OpenRouter's explicit free suffix).
-            let is_free_by_pricing = m.pricing.as_ref().map_or(false, |p| p.is_free());
-            let is_free_by_id      = plain_id.ends_with(":free");
-            if !is_free_by_pricing && !is_free_by_id {
-                continue; // paid model — skip
-            }
-            // ──────────────────────────────────────────────────────────────────
-
             let registry_id = format!("openrouter:{}", plain_id);
             openrouter_ids.insert(registry_id.clone());
+
+            // Determine free vs paid for tagging purposes
+            let is_free = m.pricing.as_ref().map_or(true, |p| p.is_free())
+                || plain_id.ends_with(":free");
 
             // Derive provider tag from the model id prefix (e.g. "openai/gpt-4o")
             let provider = plain_id
@@ -240,8 +255,12 @@ impl ModelRegistry {
                 "api".to_string(),
                 "online".to_string(),
                 "cloud".to_string(),
-                "free".to_string(),   // confirmed free-tier
             ];
+            if is_free {
+                tags.push("free".to_string());
+            } else {
+                tags.push("paid".to_string());
+            }
             if !provider.is_empty() {
                 tags.push(format!("provider:{}", provider));
             }
@@ -277,6 +296,11 @@ impl ModelRegistry {
                 None
             };
 
+            let pricing = m.pricing.as_ref().map(|p| ModelPricing {
+                prompt: p.prompt.clone(),
+                completion: p.completion.clone(),
+            });
+
             let model_info = ModelInfo {
                 id: registry_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| plain_id.clone()),
@@ -297,6 +321,8 @@ impl ModelRegistry {
                 total_shards: None,
                 shard_filenames: vec![],
                 downloads: 0,
+                is_gated: false,
+                pricing,
             };
 
             // Insert or update existing OpenRouter entry
@@ -309,6 +335,7 @@ impl ModelRegistry {
                     existing.format = model_info.format.clone();
                     existing.download_source = model_info.download_source.clone();
                     existing.tags = model_info.tags.clone();
+                    existing.pricing = model_info.pricing.clone();
                 })
                 .or_insert(model_info);
         }
@@ -362,15 +389,13 @@ impl ModelRegistry {
         for m in models.into_iter() {
             let repo_id = m.model_id.as_ref().unwrap_or(&m.id).clone();
 
-            // Skip gated models that require user approval on HuggingFace
+            // Flag gated models — they require HuggingFace access approval.
+            // We include them in the catalog so the UI can show a
+            // "Request Access" button instead of a direct download button.
             let is_gated = match &m.gated {
                 Some(serde_json::Value::Bool(false)) | None => false,
                 _ => true, // "auto", "manual", true all count as gated
             };
-            if is_gated {
-                debug!("Skipping gated model: {}", repo_id);
-                continue;
-            }
 
             // Find GGUF files in siblings
             let gguf_files: Vec<&HuggingFaceSibling> = m
@@ -455,6 +480,8 @@ impl ModelRegistry {
                         total_shards: Some(total_shards),
                         shard_filenames: all_shards.iter().map(|s| s.rfilename.clone()).collect(),
                         downloads: m.downloads.unwrap_or(0),
+                        is_gated,
+                        pricing: None,
                     });
                     break; // Found sharded model, no need to check other files
                 }
@@ -546,6 +573,8 @@ impl ModelRegistry {
                     total_shards: None,
                     shard_filenames: vec![],
                     downloads: m.downloads.unwrap_or(0),
+                    is_gated,
+                    pricing: None,
                 }
             };
 
@@ -565,6 +594,7 @@ impl ModelRegistry {
                         existing.tags = model_info.tags.clone();
                         existing.total_shards = model_info.total_shards;
                         existing.shard_filenames = model_info.shard_filenames.clone();
+                        existing.is_gated = model_info.is_gated;
                     }
                 })
                 .or_insert(model_info);
@@ -653,6 +683,8 @@ impl ModelRegistry {
                     total_shards: None,
                     shard_filenames: vec![],
                     downloads: 0,
+                    is_gated: false,
+                    pricing: None,
                 };
                 
                 self.models.insert(model_id, model_info);
@@ -1011,6 +1043,19 @@ impl ModelRegistry {
                 None
             };
 
+            let is_free = m.pricing.as_ref().map_or(true, |p| p.is_free())
+                || plain_id.ends_with(":free");
+            if is_free {
+                tags.push("free".to_string());
+            } else {
+                tags.push("paid".to_string());
+            }
+
+            let pricing = m.pricing.as_ref().map(|p| ModelPricing {
+                prompt: p.prompt.clone(),
+                completion: p.completion.clone(),
+            });
+
             let model_info = ModelInfo {
                 id: registry_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| plain_id.clone()),
@@ -1031,6 +1076,8 @@ impl ModelRegistry {
                 total_shards: None,
                 shard_filenames: vec![],
                 downloads: 0,
+                is_gated: false,
+                pricing,
             };
 
             // Insert or update - this will replace any existing entry
@@ -1165,6 +1212,9 @@ mod tests {
             provider: None,
             total_shards: None,
             shard_filenames: vec![],
+            downloads: 0,
+            is_gated: false,
+            pricing: None,
         };
         
         registry.add_model(model_info);

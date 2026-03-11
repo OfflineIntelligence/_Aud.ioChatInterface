@@ -36,38 +36,19 @@ const SettingsPanel: React.FC<{
   const [keyModal, setKeyModal] = useState<'openrouter' | 'huggingface' | null>(null);
   const [keyInput, setKeyInput] = useState('');
   const [showKey, setShowKey] = useState(false);
-  const [isSavingKey, setIsSavingKey] = useState(false);
-  const [keyError, setKeyError] = useState('');
 
   const openKeyModal = (type: 'openrouter' | 'huggingface') => {
     setKeyInput(type === 'openrouter' ? openRouterApiKey : hfToken);
     setShowKey(false);
-    setKeyError('');
     setKeyModal(type);
   };
 
-  const saveKey = async () => {
+  // Save directly to OS keychain + localStorage + React state via context.
+  // No external API verification — matches ModelsPanel behavior so any valid-format
+  // key (including fine-grained / read-only tokens) can be saved without friction.
+  const saveKey = () => {
     const trimmed = keyInput.trim();
     if (!trimmed) return;
-    setIsSavingKey(true);
-    setKeyError('');
-    try {
-      const response = await fetch(`${getApiBaseSync()}/api-keys/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key_type: keyModal, api_key: trimmed }),
-      });
-      const data = await response.json();
-      if (!data.valid) {
-        setKeyError(data.message || 'Invalid API key. Please check and try again.');
-        return;
-      }
-    } catch {
-      setKeyError('Failed to verify key. Please check your internet connection.');
-      return;
-    } finally {
-      setIsSavingKey(false);
-    }
     if (keyModal === 'openrouter') setOpenRouterApiKey(trimmed);
     else setHfToken(trimmed);
     setKeyModal(null);
@@ -283,8 +264,7 @@ const SettingsPanel: React.FC<{
           <div className="settings-section" style={{ marginTop: '32px' }}>
             <h2 style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '16px' }}>About</h2>
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.8 }}>
-              <p>_Aud.io Chat Interface v0.1.0</p>
-              <p>Offline-first AI assistant with local model support.</p>
+              <p>Offline Chat Interface v0.1.0</p>
             </div>
           </div>
 
@@ -521,7 +501,7 @@ const SettingsPanel: React.FC<{
                 type={showKey ? 'text' : 'password'}
                 value={keyInput}
                 onChange={(e) => setKeyInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !isSavingKey) saveKey(); if (e.key === 'Escape') setKeyModal(null); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') saveKey(); if (e.key === 'Escape') setKeyModal(null); }}
                 placeholder={keyModal === 'openrouter' ? 'sk-or-v1-...' : 'hf_...'}
                 autoFocus
                 style={{
@@ -547,21 +527,15 @@ const SettingsPanel: React.FC<{
               </button>
             </div>
 
-            {/* Error message */}
-            {keyError && (
-              <p style={{ margin: '8px 0 0', fontSize: '12px', color: '#ef4444', textAlign: 'center' }}>{keyError}</p>
-            )}
-
             {/* Actions */}
             <div style={{ display: 'flex', gap: '8px', marginTop: '16px', justifyContent: 'flex-end' }}>
               {(keyModal === 'openrouter' ? openRouterApiKey : hfToken) && (
                 <button
                   onClick={removeKey}
-                  disabled={isSavingKey}
                   style={{
                     padding: '9px 16px', borderRadius: '8px', border: '1px solid rgba(239,68,68,0.4)',
                     background: 'rgba(239,68,68,0.08)', color: '#ef4444',
-                    fontSize: '13px', fontWeight: 600, cursor: isSavingKey ? 'not-allowed' : 'pointer', marginRight: 'auto',
+                    fontSize: '13px', fontWeight: 600, cursor: 'pointer', marginRight: 'auto',
                   }}
                 >
                   Remove
@@ -569,28 +543,27 @@ const SettingsPanel: React.FC<{
               )}
               <button
                 onClick={() => setKeyModal(null)}
-                disabled={isSavingKey}
                 style={{
                   padding: '9px 18px', borderRadius: '8px',
                   border: '1px solid var(--border-primary)',
                   background: 'transparent', color: 'var(--text-secondary)',
-                  fontSize: '13px', fontWeight: 600, cursor: isSavingKey ? 'not-allowed' : 'pointer',
+                  fontSize: '13px', fontWeight: 600, cursor: 'pointer',
                 }}
               >
                 Cancel
               </button>
               <button
                 onClick={saveKey}
-                disabled={!keyInput.trim() || isSavingKey}
+                disabled={!keyInput.trim()}
                 style={{
                   padding: '9px 20px', borderRadius: '8px', border: 'none',
-                  background: (keyInput.trim() && !isSavingKey) ? 'var(--accent-primary, #00d4aa)' : 'var(--bg-secondary)',
-                  color: (keyInput.trim() && !isSavingKey) ? '#fff' : 'var(--text-muted)',
+                  background: keyInput.trim() ? 'var(--accent-primary, #00d4aa)' : 'var(--bg-secondary)',
+                  color: keyInput.trim() ? '#fff' : 'var(--text-muted)',
                   fontSize: '13px', fontWeight: 600,
-                  cursor: (keyInput.trim() && !isSavingKey) ? 'pointer' : 'not-allowed',
+                  cursor: keyInput.trim() ? 'pointer' : 'not-allowed',
                 }}
               >
-                {isSavingKey ? 'Verifying…' : 'Save'}
+                Save
               </button>
             </div>
           </div>

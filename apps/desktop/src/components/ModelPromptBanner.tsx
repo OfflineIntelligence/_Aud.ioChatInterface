@@ -34,11 +34,7 @@ export function ModelPromptBanner({
         <div
             className="model-prompt-banner"
             style={{
-                position: 'absolute',
-                bottom: '100%',
-                left: '50%',
-                transform: 'translateX(-50%)',
-                marginBottom: '12px',
+                margin: '12px auto 0',
                 width: 'calc(100% - 32px)',
                 maxWidth: '600px',
                 backgroundColor: 'var(--bg-secondary)',
@@ -46,8 +42,7 @@ export function ModelPromptBanner({
                 borderRadius: '12px',
                 padding: '16px',
                 boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)',
-                zIndex: 100,
-                animation: 'slideUp 0.3s ease-out',
+                animation: 'slideDown 0.3s ease-out',
             }}
         >
             {/* Header with mode indicator */}
@@ -121,8 +116,8 @@ export function ModelPromptBanner({
                                 fontSize: '13px',
                                 padding: '10px 16px',
                                 borderRadius: '9999px', /* Capsule shape */
-                                backgroundColor: '#1e40af', /* Dark blue color */
-                                color: 'white',
+                                backgroundColor: 'var(--text-primary)',
+                                color: 'var(--bg-primary)',
                                 border: 'none',
                                 cursor: 'pointer',
                                 fontWeight: 500,
@@ -137,8 +132,8 @@ export function ModelPromptBanner({
                                 e.currentTarget.style.color = hoverTextColor;
                             }}
                             onMouseOut={(e) => {
-                                e.currentTarget.style.backgroundColor = '#1e40af';
-                                e.currentTarget.style.color = 'white';
+                                e.currentTarget.style.backgroundColor = 'var(--text-primary)';
+                                e.currentTarget.style.color = 'var(--bg-primary)';
                             }}
                         >
                             <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -201,8 +196,8 @@ export function ModelPromptBanner({
                                 e.currentTarget.style.color = hoverTextColor;
                             }}
                             onMouseOut={(e) => {
-                                e.currentTarget.style.backgroundColor = '#1e40af';
-                                e.currentTarget.style.color = 'white';
+                                e.currentTarget.style.backgroundColor = 'var(--text-primary)';
+                                e.currentTarget.style.color = 'var(--bg-primary)';
                             }}
                         >
                             <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -234,14 +229,14 @@ export function ModelPromptBanner({
 
             {/* CSS Animation */}
             <style>{`
-                @keyframes slideUp {
+                @keyframes slideDown {
                     from {
                         opacity: 0;
-                        transform: translateX(-50%) translateY(10px);
+                        transform: translateY(-10px);
                     }
                     to {
                         opacity: 1;
-                        transform: translateX(-50%) translateY(0);
+                        transform: translateY(0);
                     }
                 }
             `}</style>

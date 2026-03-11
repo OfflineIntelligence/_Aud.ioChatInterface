@@ -14,6 +14,7 @@ export interface Notification {
   message: string;
   duration?: number; // milliseconds, 0 for persistent
   timestamp: Date;
+  actions?: Array<{ label: string; onClick: () => void; isPrimary?: boolean }>;
 }
 
 // Action types

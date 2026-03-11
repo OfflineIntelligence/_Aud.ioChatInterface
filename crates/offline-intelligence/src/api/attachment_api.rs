@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use crate::api::stream_api::ChatAttachment;
 use crate::shared_state::{PreExtracted, UnifiedAppState};
-use crate::utils::extract_content_from_bytes;
+use crate::utils::{extract_content_from_bytes, is_extraction_sentinel};
 
 /// TTL for cached pre-extracted entries (30 minutes).
 /// The background eviction task checks every 5 minutes.
@@ -192,6 +192,11 @@ async fn extract_for_cache(
             let text = extract_content_from_bytes(&bytes, &attach.name)
                 .await
                 .map_err(|e| anyhow::anyhow!("extract '{}': {}", attach.name, e))?;
+            // Do not cache sentinel strings — let try_extract_attachment surface the
+            // proper user-facing error at Send time via HTTP 422.
+            if is_extraction_sentinel(&text) {
+                return Err(anyhow::anyhow!("extraction failed for '{}' — result is sentinel", attach.name));
+            }
             Ok(text)
         }
 
@@ -208,6 +213,10 @@ async fn extract_for_cache(
             let text = extract_content_from_bytes(&bytes, &attach.name)
                 .await
                 .map_err(|e| anyhow::anyhow!("extract '{}': {}", attach.name, e))?;
+            // Do not cache sentinel strings.
+            if is_extraction_sentinel(&text) {
+                return Err(anyhow::anyhow!("extraction failed for '{}' — result is sentinel", attach.name));
+            }
             Ok(text)
         }
 

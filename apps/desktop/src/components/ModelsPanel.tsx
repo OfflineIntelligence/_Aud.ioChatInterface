@@ -6,6 +6,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Search, Download, Trash2, HardDrive, Cpu, Monitor, Database, ArrowLeft, RefreshCw, Pause, Play, Square, ChevronDown } from 'lucide-react';
 import { useNotificationHelpers } from '../contexts/NotificationContext';
+import { saveInterruptedDownload, removeInterruptedDownload } from '../api/models';
 import { useAuth } from '../contexts/AuthContext';
 import { open } from '@tauri-apps/plugin-shell';
 import { getApiBaseSync } from '../api/backendUrl';
@@ -938,6 +939,11 @@ export function showOpenRouterApiKeyModal(
 }
 
 // Types
+interface ModelPricing {
+  prompt: string;
+  completion: string;
+}
+
 interface Model {
   id: string;
   name: string;
@@ -955,6 +961,10 @@ interface Model {
   context_length?: number; // e.g., 4096, 8192, 128000
   provider?: string; // For OpenRouter: the provider name
   filename?: string; // Specific filename for HuggingFace models
+  /** Whether this HuggingFace model requires access approval */
+  is_gated?: boolean;
+  /** Pricing info for OpenRouter models */
+  pricing?: ModelPricing;
 }
 
 interface DownloadProgress {
@@ -981,7 +991,18 @@ interface HardwareInfo {
   storage_available_bytes: number;
 }
 
-type SortOption = 'name' | 'size_asc' | 'size_desc' | 'compatibility' | 'source' | 'trending' | 'popularity';
+type SortOption =
+  | 'free_first'    // Free models first, then paid (default in online mode)
+  | 'compatibility' // Best hardware match (default in offline mode)
+  | 'name'          // Name A–Z
+  | 'name_desc'     // Name Z–A
+  | 'provider_az'   // Provider / Company A–Z
+  | 'context_desc'  // Longest context window first
+  | 'size_asc'      // Smallest model first (local)
+  | 'size_desc'     // Largest model first (local)
+  | 'source'
+  | 'trending'
+  | 'popularity';
 
 
 
@@ -996,6 +1017,7 @@ interface SelectedModel {
   id: string;
   name: string;
   source: 'local' | 'openrouter';
+  pricing?: { prompt: string; completion: string };
 }
 
 const ModelsPanel: React.FC<{
@@ -1008,16 +1030,17 @@ const ModelsPanel: React.FC<{
   onToggleOnlineMode?: (isOnline: boolean) => void;
   focusApiKeyInput?: boolean; // Add prop to control focusing API key input
   focusHfTokenInput?: boolean; // Add prop to control focusing HuggingFace token input
-}> = ({ isOpen, onClose, selectedModel, onSelectModel, openRouterApiKey, onOpenRouterApiKeyChange, onToggleOnlineMode, focusApiKeyInput, focusHfTokenInput }) => {
+  initialTab?: 'installed' | 'available' | 'downloads';
+}> = ({ isOpen, onClose, selectedModel, onSelectModel, openRouterApiKey, onOpenRouterApiKeyChange, onToggleOnlineMode, focusApiKeyInput, focusHfTokenInput, initialTab }) => {
   const [models, setModels] = useState<Model[]>([]);
   const [downloads, setDownloads] = useState<DownloadProgress[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'installed' | 'available' | 'downloads'>('available');
+  const [activeTab, setActiveTab] = useState<'installed' | 'available' | 'downloads'>(initialTab ?? 'available');
   const [hardwareInfo, setHardwareInfo] = useState<HardwareInfo | null>(null);
   const [activeModelInfo, setActiveModelInfo] = useState<ActiveModelInfo | null>(null);
-  const [sortBy, setSortBy] = useState<SortOption>('compatibility');
+  const [sortBy, setSortBy] = useState<SortOption>('free_first');
   const [showSortDropdown, setShowSortDropdown] = useState(false);
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [showHfTokenInput, setShowHfTokenInput] = useState(false);
@@ -1032,6 +1055,18 @@ const ModelsPanel: React.FC<{
   const [showRemoveConfirmation, setShowRemoveConfirmation] = useState(false);
   const [modelToRemove, setModelToRemove] = useState<Model | null>(null);
 
+  // OpenRouter quota state
+  const [orQuota, setOrQuota] = useState<{ usage_usd: number; limit_usd: number | null; is_free_tier: boolean; remaining_usd: number | null } | null>(null);
+
+  // Available-tab filter state (OR catalog)
+  const [providerFilter, setProviderFilter] = useState<string>('all');
+  const [freeOnlyFilter, setFreeOnlyFilter] = useState(false);
+
+  // Sync active tab when initialTab prop changes (e.g. when "View" is clicked)
+  useEffect(() => {
+    if (initialTab) setActiveTab(initialTab);
+  }, [initialTab]);
+
   // Fetch data when panel opens and cleanup when closes
   useEffect(() => {
     if (isOpen) {
@@ -1040,7 +1075,8 @@ const ModelsPanel: React.FC<{
       fetchDownloads();
       fetchHardwareInfo();
       fetchActiveModel();
-      
+      fetchOrQuota();
+
       // Refresh again after a short delay to ensure backend is fully ready
       // This helps catch any models that might have been missed in initial load
       const refreshTimer = setTimeout(() => {
@@ -1169,6 +1205,22 @@ const ModelsPanel: React.FC<{
     }
   };
 
+  /** Fetch OpenRouter account quota/usage — silently ignored if no key stored */
+  const fetchOrQuota = async () => {
+    try {
+      const resp = await fetch(`${getApiBaseSync()}/models/openrouter/quota`);
+      if (resp.ok) {
+        const data = await resp.json();
+        setOrQuota(data);
+        // Always show all models; free ones appear first via 'free_first' sort.
+        // The free-only filter toggle is still available for the user to enable manually.
+        setSortBy('free_first');
+      }
+    } catch {
+      // Quota unavailable — not critical, ignore silently
+    }
+  };
+
   const fetchDownloads = async () => {
     try {
       // Check backend readiness before making request
@@ -1288,9 +1340,6 @@ const ModelsPanel: React.FC<{
         return;
       }
       
-      // Get HF token from localStorage if available
-      const hfToken = localStorage.getItem('aud-io-hf-token') || '';
-      
       const response = await fetch(`${getApiBaseSync()}/models/install`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1306,6 +1355,15 @@ const ModelsPanel: React.FC<{
       });
       if (response.ok) {
         showDownload('Download Started', `Downloading ${model.name}`);
+        // Persist download info so it can be resumed if the app closes mid-download
+        saveInterruptedDownload({
+          model_id: model.id,
+          model_name: model.name,
+          source: buildSourcePayload(model),
+          size_bytes: model.size_bytes,
+          format: model.format,
+          description: model.description,
+        });
         // Immediately fetch downloads to get the new entry
         await fetchDownloads();
         // Switch to downloads tab to show progress
@@ -1579,12 +1637,10 @@ const ModelsPanel: React.FC<{
               saveBtn?.addEventListener('click', () => {
                   const newToken = inputElement?.value;
                   if (newToken && newToken.trim()) {
-                      // Store the token in localStorage (or environment variable)
-                      localStorage.setItem('aud-io-hf-token', newToken.trim());
-                      alert('HuggingFace token saved successfully! Please restart the app for changes to take effect.');
-                      // Remove modal
+                      // Persist via context — syncs to OS keychain, localStorage, and React state.
+                      setHfToken(newToken.trim());
+                      // Remove modals
                       document.body.removeChild(tokenModalElement);
-                      // Remove the original modal
                       removeModalHF();
                   }
               });
@@ -1864,6 +1920,10 @@ const ModelsPanel: React.FC<{
   };
 
   const handleSwitchModel = async (modelId: string, modelName: string) => {
+    // Signal ChatWindow (already mounted by the time this async function runs) that
+    // a model switch is in progress.  Uses a window custom-event so no prop-threading
+    // is needed across the ModelsPanel → App → ChatWindow component tree.
+    window.dispatchEvent(new CustomEvent('aud-io:model-loading', { detail: { loading: true } }));
     try {
       // Background model switch — navigation has already happened instantly on button click.
       // No readiness check needed here; this runs fire-and-forget while the user is in chat.
@@ -1905,6 +1965,9 @@ const ModelsPanel: React.FC<{
     } catch (error) {
       console.error('Failed to switch model:', error);
       showError('Switch Error', `Failed to switch to ${modelName}`);
+    } finally {
+      // Always clear the loading indicator, even if an error occurred.
+      window.dispatchEvent(new CustomEvent('aud-io:model-loading', { detail: { loading: false } }));
     }
   };
 
@@ -1941,7 +2004,11 @@ const ModelsPanel: React.FC<{
         showError('Backend Not Ready', `Please ensure the offline-intelligence service is started on ${getApiBaseSync()}.`);
         return;
       }
-      
+
+      // Remove from interrupted-downloads persistence so we don't prompt to resume
+      const dl = downloads.find(d => d.download_id === downloadId);
+      if (dl) removeInterruptedDownload(dl.model_name);
+
       await fetch(`${getApiBaseSync()}/models/downloads/cancel?download_id=${downloadId}`, { method: 'POST' });
       fetchDownloads();
     } catch (e) { console.error('Cancel failed:', e); }
@@ -1983,43 +2050,78 @@ const ModelsPanel: React.FC<{
     return priorityCompanies.length; // Others come after priority companies
   };
 
+  /** Returns true when an OpenRouter model is free (prompt price == "0" or ""). */
+  const isModelFree = (model: Model): boolean => {
+    if (model.download_source !== 'openrouter') return false;
+    if (model.pricing) {
+      return (model.pricing.prompt === '0' || model.pricing.prompt === '') &&
+             (model.pricing.completion === '0' || model.pricing.completion === '');
+    }
+    return model.tags.includes('free') || model.id.includes(':free');
+  };
+
   const sortModels = (list: Model[]) => {
     return [...list].sort((a, b) => {
       switch (sortBy) {
-        // ── Explicit user sorts — no company-priority interference ────────────
+        // ── Free First — free OR models before paid, then HF, alphabetical within ──
+        case 'free_first': {
+          const aFree = isModelFree(a);
+          const bFree = isModelFree(b);
+          if (aFree !== bFree) return aFree ? -1 : 1;
+          // Within same tier: company priority then name
+          const pA = getCompanyPriority(a);
+          const pB = getCompanyPriority(b);
+          return pA !== pB ? pA - pB : a.name.localeCompare(b.name);
+        }
 
+        // ── Name A–Z ──────────────────────────────────────────────────────────
         case 'name':
-          // Pure alphabetical — ignore provider
           return a.name.localeCompare(b.name);
 
+        // ── Name Z–A ──────────────────────────────────────────────────────────
+        case 'name_desc':
+          return b.name.localeCompare(a.name);
+
+        // ── Provider / Company A–Z ────────────────────────────────────────────
+        case 'provider_az': {
+          const provA = (a.provider || a.author || 'zzz').toLowerCase();
+          const provB = (b.provider || b.author || 'zzz').toLowerCase();
+          if (provA !== provB) return provA.localeCompare(provB);
+          return a.name.localeCompare(b.name);
+        }
+
+        // ── Context window — longest first ────────────────────────────────────
+        case 'context_desc': {
+          const ctxA = a.context_length ?? 0;
+          const ctxB = b.context_length ?? 0;
+          if (ctxB !== ctxA) return ctxB - ctxA;
+          return a.name.localeCompare(b.name);
+        }
+
+        // ── Local model size ──────────────────────────────────────────────────
         case 'size_asc':
-          // Smallest first; OpenRouter models have size_bytes=0 so they go last
           if (a.size_bytes === 0 && b.size_bytes === 0) return a.name.localeCompare(b.name);
           if (a.size_bytes === 0) return 1;
           if (b.size_bytes === 0) return -1;
           return a.size_bytes - b.size_bytes;
 
         case 'size_desc':
-          // Largest first; same tie-break as above
           if (a.size_bytes === 0 && b.size_bytes === 0) return a.name.localeCompare(b.name);
           if (a.size_bytes === 0) return 1;
           if (b.size_bytes === 0) return -1;
           return b.size_bytes - a.size_bytes;
 
+        // ── Best hardware match (local models) ────────────────────────────────
         case 'compatibility': {
-          // Best Match: use hardware compatibility score for local models.
-          // OpenRouter models don't have a score — treat them as 0.5 (mid-range)
-          // so they interleave with local models instead of all sinking to the bottom.
           const scoreA = a.compatibility_score ?? (a.download_source === 'openrouter' ? 0.5 : 0);
           const scoreB = b.compatibility_score ?? (b.download_source === 'openrouter' ? 0.5 : 0);
           if (scoreB !== scoreA) return scoreB - scoreA;
-          // Tie-break by company priority, then name
           const pA = getCompanyPriority(a);
           const pB = getCompanyPriority(b);
           return pA !== pB ? pA - pB : a.name.localeCompare(b.name);
         }
 
-        // ── Default / Trending — use company priority as primary sort ─────────
+        // ── Default / Trending ────────────────────────────────────────────────
         default: {
           const pA = getCompanyPriority(a);
           const pB = getCompanyPriority(b);
@@ -2060,20 +2162,70 @@ const ModelsPanel: React.FC<{
       model.author?.toLowerCase().includes(searchLower) ||
       model.tags.some(tag => tag.toLowerCase().includes(searchLower));
     if (activeTab === 'installed') return matchesSearch && isInstalled(model);
-    if (activeTab === 'available') return matchesSearch && isAvailable(model);
+    if (activeTab === 'available') {
+      if (!matchesSearch || !isAvailable(model)) return false;
+      // Provider chip filter (OR models only)
+      if (providerFilter !== 'all' && model.download_source === 'openrouter') {
+        const prov = (model.provider || model.author || '').toLowerCase();
+        if (!prov.includes(providerFilter.toLowerCase())) return false;
+      }
+      // Free-only toggle (OR models only)
+      if (freeOnlyFilter && model.download_source === 'openrouter') {
+        const isFree = model.pricing
+          ? (model.pricing.prompt === '0' || model.pricing.prompt === '') &&
+            (model.pricing.completion === '0' || model.pricing.completion === '')
+          : model.tags.includes('free');
+        if (!isFree) return false;
+      }
+      return true;
+    }
     return matchesSearch;
   })));
+
+  // Derive list of distinct OR providers for filter chips
+  const orProviders: string[] = Array.from(
+    new Set(
+      models
+        .filter(m => m.download_source === 'openrouter' && isAvailable(m) && (m.provider || m.author))
+        .map(m => (m.provider || m.author || '').toLowerCase())
+        .filter(Boolean)
+    )
+  ).sort();
 
   if (!isOpen) return null;
 
   const activeDownloadCount = downloads.filter(d => d.status === 'Downloading' || d.status === 'Starting').length;
 
-  const sortOptions: { value: SortOption; label: string }[] = [
-    { value: 'compatibility', label: 'Best Match' },
-    { value: 'name',          label: 'Name (A–Z)' },
-    { value: 'size_asc',      label: 'Smallest First' },
-    { value: 'size_desc',     label: 'Largest First' },
+  type SortGroup = { group: string; options: { value: SortOption; label: string; description: string }[] };
+  const sortGroups: SortGroup[] = [
+    {
+      group: 'General',
+      options: [
+        { value: 'free_first',   label: 'Free First',        description: 'Free models before paid' },
+        { value: 'compatibility',label: 'Best Match',        description: 'Hardware compatibility' },
+        { value: 'provider_az',  label: 'Provider A–Z',      description: 'Sorted by company name' },
+      ],
+    },
+    {
+      group: 'Name',
+      options: [
+        { value: 'name',      label: 'Name A–Z',  description: 'Alphabetical ascending' },
+        { value: 'name_desc', label: 'Name Z–A',  description: 'Alphabetical descending' },
+      ],
+    },
+    {
+      group: 'Capabilities',
+      options: [
+        { value: 'context_desc', label: 'Context Length ↓', description: 'Longest context window first' },
+        { value: 'size_asc',     label: 'Local: Smallest',  description: 'Smallest local models first' },
+        { value: 'size_desc',    label: 'Local: Largest',   description: 'Largest local models first' },
+      ],
+    },
   ];
+
+  const currentSortLabel = sortGroups
+    .flatMap(g => g.options)
+    .find(o => o.value === sortBy)?.label ?? 'Sort';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100%', backgroundColor: 'var(--bg-primary)' }}>
@@ -2173,20 +2325,55 @@ const ModelsPanel: React.FC<{
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingBottom: '2px' }}>
             {/* Sort dropdown */}
             <div style={{ position: 'relative' }}>
-              <button className="header-button" onClick={() => setShowSortDropdown(!showSortDropdown)}>
-                Sort <ChevronDown size={14} />
+              <button
+                className="header-button"
+                onClick={() => setShowSortDropdown(!showSortDropdown)}
+                style={{ display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}
+              >
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Sort:</span>
+                <span>{currentSortLabel}</span>
+                <ChevronDown size={13} />
               </button>
               {showSortDropdown && (
-                <div className="dropdown-menu" style={{ right: 0, top: '100%', minWidth: '160px' }}>
-                  {sortOptions.map(opt => (
-                    <button
-                      key={opt.value}
-                      className="dropdown-item"
-                      style={{ fontSize: '13px', fontWeight: sortBy === opt.value ? 600 : 400 }}
-                      onClick={() => { setSortBy(opt.value); setShowSortDropdown(false); }}
-                    >
-                      {opt.label}
-                    </button>
+                <div
+                  className="dropdown-menu"
+                  style={{ right: 0, top: '100%', minWidth: '220px', padding: '4px 0' }}
+                >
+                  {sortGroups.map((grp, gi) => (
+                    <div key={grp.group}>
+                      {gi > 0 && (
+                        <div style={{
+                          height: '1px', backgroundColor: 'var(--border-primary)',
+                          margin: '4px 8px',
+                        }} />
+                      )}
+                      <div style={{
+                        padding: '4px 12px 2px',
+                        fontSize: '10px', fontWeight: 700, letterSpacing: '0.08em',
+                        color: 'var(--text-muted)', textTransform: 'uppercase',
+                      }}>
+                        {grp.group}
+                      </div>
+                      {grp.options.map(opt => (
+                        <button
+                          key={opt.value}
+                          className="dropdown-item"
+                          style={{
+                            display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
+                            padding: '6px 12px',
+                            background: sortBy === opt.value ? 'var(--bg-tertiary)' : 'transparent',
+                          }}
+                          onClick={() => { setSortBy(opt.value); setShowSortDropdown(false); }}
+                        >
+                          <span style={{ fontSize: '13px', fontWeight: sortBy === opt.value ? 600 : 400 }}>
+                            {sortBy === opt.value ? '✓ ' : ''}{opt.label}
+                          </span>
+                          <span style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '1px' }}>
+                            {opt.description}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
                   ))}
                 </div>
               )}
@@ -2383,6 +2570,106 @@ const ModelsPanel: React.FC<{
           ) : (
             /* Installed / Available Tab */
             <div>
+              {/* ── OpenRouter quota bar (available tab, OR key present) ──────── */}
+              {activeTab === 'available' && orQuota && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: '12px',
+                  padding: '10px 14px', marginBottom: '14px',
+                  background: 'var(--bg-secondary)',
+                  border: '1px solid var(--border-primary)',
+                  borderRadius: '10px', fontSize: '12px',
+                }}>
+                  <span style={{ color: 'var(--text-secondary)', fontWeight: 500, whiteSpace: 'nowrap' }}>
+                    OpenRouter Credits
+                  </span>
+                  <div style={{ flex: 1, height: '6px', background: 'var(--bg-tertiary)', borderRadius: '9999px', overflow: 'hidden' }}>
+                    {orQuota.limit_usd != null && orQuota.limit_usd > 0 ? (
+                      <div style={{
+                        height: '100%', borderRadius: '9999px',
+                        background: 'var(--text-primary)',
+                        width: `${Math.min(100, ((orQuota.limit_usd - (orQuota.usage_usd ?? 0)) / orQuota.limit_usd) * 100)}%`,
+                        transition: 'width 0.4s ease',
+                      }} />
+                    ) : (
+                      <div style={{ height: '100%', borderRadius: '9999px', background: 'var(--text-primary)', width: '100%', opacity: 0.2 }} />
+                    )}
+                  </div>
+                  <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                    {orQuota.is_free_tier ? 'Free tier' :
+                      orQuota.limit_usd != null
+                        ? `$${(orQuota.remaining_usd ?? 0).toFixed(2)} left`
+                        : `$${(orQuota.usage_usd ?? 0).toFixed(4)} used`}
+                  </span>
+                  <button
+                    onClick={() => open('https://openrouter.ai/credits')}
+                    style={{
+                      padding: '3px 10px', borderRadius: '9999px',
+                      border: '1px solid var(--border-primary)',
+                      background: 'transparent', color: 'var(--text-primary)',
+                      fontSize: '11px', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+                    }}
+                  >
+                    Add Credits
+                  </button>
+                </div>
+              )}
+
+              {/* ── Curated company filter chips (available tab) ─────────────── */}
+              {activeTab === 'available' && (() => {
+                const COMPANIES: Array<{ label: string; filter: string }> = [
+                  { label: 'All',          filter: 'all' },
+                  { label: 'Free only',    filter: 'free' },
+                  { label: 'Google',       filter: 'google' },
+                  { label: 'Anthropic',    filter: 'anthropic' },
+                  { label: 'Moonshot AI',  filter: 'moonshot' },
+                  { label: 'OpenAI',       filter: 'openai' },
+                  { label: 'Nvidia',       filter: 'nvidia' },
+                  { label: 'Kimi',         filter: 'kimi' },
+                  { label: 'DeepSeek',     filter: 'deepseek' },
+                  { label: 'Qwen',         filter: 'qwen' },
+                ];
+                return (
+                  <div style={{
+                    display: 'flex', flexWrap: 'wrap', gap: '6px',
+                    marginBottom: '16px', justifyContent: 'center', alignItems: 'center',
+                  }}>
+                    {COMPANIES.map(({ label, filter }) => {
+                      const isActive = filter === 'free'
+                        ? freeOnlyFilter
+                        : filter === 'all'
+                          ? providerFilter === 'all' && !freeOnlyFilter
+                          : providerFilter === filter;
+                      return (
+                        <button
+                          key={filter}
+                          onClick={() => {
+                            if (filter === 'free') {
+                              setFreeOnlyFilter(f => !f);
+                              setProviderFilter('all');
+                            } else if (filter === 'all') {
+                              setProviderFilter('all');
+                              setFreeOnlyFilter(false);
+                            } else {
+                              setProviderFilter(providerFilter === filter ? 'all' : filter);
+                              setFreeOnlyFilter(false);
+                            }
+                          }}
+                          style={{
+                            padding: '4px 14px', borderRadius: '9999px', fontSize: '11px', fontWeight: 600,
+                            border: `1px solid ${isActive ? 'var(--text-primary)' : 'var(--border-primary)'}`,
+                            background: isActive ? 'var(--text-primary)' : 'transparent',
+                            color: isActive ? 'var(--bg-primary)' : 'var(--text-secondary)',
+                            cursor: 'pointer', transition: 'all 0.15s', whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+
               {filteredModels.length === 0 ? (
                 <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-muted)' }}>
                   <Download size={40} style={{ margin: '0 auto 12px', opacity: 0.5 }} />
@@ -2644,6 +2931,13 @@ const ModelCard: React.FC<{
   const [hfTokenInputError, setHfTokenInputError] = useState('');
   const hfTokenRef = useRef<HTMLInputElement>(null);
 
+  // Gated model access polling state
+  const [gatedAccessStatus, setGatedAccessStatus] = useState<'idle' | 'checking' | 'approved' | 'not_approved' | 'error'>('idle');
+  const gatedPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Set to true when requestGatedAccess opens the HF token modal so saveHfToken
+  // knows to continue the gated-access flow instead of calling onInstall.
+  const pendingGatedRequestRef = useRef(false);
+
   // Focus input when switching to the input step
   useEffect(() => {
     if (orModalStep === 'input') setTimeout(() => orKeyRef.current?.focus(), 50);
@@ -2652,8 +2946,65 @@ const ModelCard: React.FC<{
     if (hfModalStep === 'input') setTimeout(() => hfTokenRef.current?.focus(), 50);
   }, [hfModalStep]);
 
+  // Clear gated poll on unmount
+  useEffect(() => {
+    return () => {
+      if (gatedPollRef.current) clearInterval(gatedPollRef.current);
+    };
+  }, []);
+
   const closeOrModal = () => { setOrModalStep('none'); setOrKeyInput(''); setOrKeyError(false); };
-  const closeHfModal = () => { setHfModalStep('none'); setHfTokenInput(''); setHfTokenError(false); };
+  const closeHfModal = () => { setHfModalStep('none'); setHfTokenInput(''); setHfTokenError(false); pendingGatedRequestRef.current = false; };
+
+  /** Start polling the backend for HF gated-model access approval. */
+  const startGatedAccessPolling = async (token: string) => {
+    const repoId = model.id;
+    const filename = model.filename || '';
+    await open(`https://huggingface.co/${repoId}`);
+    setGatedAccessStatus('checking');
+    let attempts = 0;
+    const maxAttempts = 30; // 30 × 10 s = 5 minutes
+    gatedPollRef.current = setInterval(async () => {
+      attempts++;
+      try {
+        const params = new URLSearchParams({ repo_id: repoId, filename });
+        if (token) params.append('hf_token', token);
+        const resp = await fetch(`${getApiBaseSync()}/models/hf/access?${params}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.can_download) {
+            clearInterval(gatedPollRef.current!);
+            gatedPollRef.current = null;
+            setGatedAccessStatus('approved');
+            return;
+          }
+        }
+      } catch {
+        // Network hiccup — keep polling
+      }
+      if (attempts >= maxAttempts) {
+        clearInterval(gatedPollRef.current!);
+        gatedPollRef.current = null;
+        setGatedAccessStatus('error');
+      }
+    }, 10_000);
+  };
+
+  /**
+   * Handle "Request Access" click on a gated HuggingFace model.
+   * If the user has no HF token yet, open the token modal first; the modal's
+   * save handler will automatically continue the access-check flow.
+   */
+  const requestGatedAccess = async () => {
+    if (!ctxHfToken) {
+      // No token — prompt the user to add one before polling starts.
+      // Without a token every poll would return "not approved" endlessly.
+      pendingGatedRequestRef.current = true;
+      setHfModalStep('choice');
+      return;
+    }
+    await startGatedAccessPolling(ctxHfToken);
+  };
 
   const verifyApiKey = async (keyType: 'openrouter' | 'huggingface', apiKey: string): Promise<{ valid: boolean; message: string }> => {
     try {
@@ -2691,7 +3042,7 @@ const ModelCard: React.FC<{
   const saveHfToken = async () => {
     const token = hfTokenInput.trim();
     if (!token) { setHfTokenError(true); setTimeout(() => setHfTokenError(false), 1000); return; }
-    
+
     // Verify the token first
     const verification = await verifyApiKey('huggingface', token);
     if (!verification.valid) {
@@ -2700,10 +3051,18 @@ const ModelCard: React.FC<{
       setTimeout(() => { setHfTokenError(false); setHfTokenInputError(''); }, 3000);
       return;
     }
-    
+
     ctxSetHfToken(token);
     closeHfModal();
-    onInstall(model);
+
+    if (pendingGatedRequestRef.current) {
+      // The modal was opened because "Request Access" was clicked without a token.
+      // Now that we have one, automatically continue the gated-access flow.
+      pendingGatedRequestRef.current = false;
+      await startGatedAccessPolling(token);
+    } else {
+      onInstall(model);
+    }
   };
 
   const isOpenRouter = model.download_source === 'openrouter';
@@ -2732,38 +3091,57 @@ const ModelCard: React.FC<{
   return (
     <>
     <div style={{
-      background: 'rgba(255, 255, 255, 0.05)',
-      backdropFilter: 'blur(10px)',
-      WebkitBackdropFilter: 'blur(10px)',
-      border: isSelected ? '2px solid var(--accent)' : '1px solid rgba(255, 255, 255, 0.1)',
+      background: 'var(--bg-secondary)',
+      border: isSelected ? '2px solid var(--text-primary)' : '1px solid var(--border-primary)',
       borderRadius: '16px', padding: isSelected ? '15px' : '16px',
       transition: 'all 0.2s ease',
-      boxShadow: '0 4px 24px rgba(0, 0, 0, 0.06)',
+      boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
       display: 'flex',
       flexDirection: 'column',
       minHeight: '180px',
     }}
       onMouseEnter={e => {
-        e.currentTarget.style.transform = 'translateY(-2px)';
-        e.currentTarget.style.boxShadow = '0 8px 32px rgba(0, 0, 0, 0.12)';
+        e.currentTarget.style.transform = 'translateY(-1px)';
+        e.currentTarget.style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.1)';
       }}
       onMouseLeave={e => {
         e.currentTarget.style.transform = 'translateY(0)';
-        e.currentTarget.style.boxShadow = '0 4px 24px rgba(0, 0, 0, 0.06)';
+        e.currentTarget.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.06)';
       }}
     >
       {/* Card Header - source badge without logo */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
         <h3 style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)', flex: 1, marginRight: '8px' }}>{model.name}</h3>
-        <span style={{
-          fontSize: '11px', fontWeight: 600, padding: '4px 10px', borderRadius: '999px',
-          backgroundColor: model.download_source === 'huggingface' ? '#ffffff' : model.download_source === 'openrouter' ? '#ffffff' : 'var(--bg-tertiary)',
-          color: '#000000',
-          border: '1px solid rgba(0, 0, 0, 0.2)',
-          whiteSpace: 'nowrap',
-        }}>
-          {getSourceLabel(model.download_source)}
-        </span>
+        <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexShrink: 0 }}>
+          {model.is_gated && (
+            <span title="Requires HuggingFace access approval" style={{
+              fontSize: '11px', padding: '4px 8px', borderRadius: '999px',
+              backgroundColor: 'var(--bg-tertiary)',
+              color: 'var(--text-muted)',
+              border: '1px solid var(--border-primary)',
+            }}>Gated</span>
+          )}
+          {model.download_source === 'openrouter' && model.pricing && (
+            <span style={{
+              fontSize: '11px', padding: '4px 8px', borderRadius: '999px',
+              backgroundColor: 'var(--bg-tertiary)',
+              color: 'var(--text-muted)',
+              border: '1px solid var(--border-primary)',
+            }}>
+              {(model.pricing.prompt === '0' || model.pricing.prompt === '')
+                ? 'Free' : `$${parseFloat(model.pricing.prompt).toExponential(0)}/tok`}
+            </span>
+          )}
+          <span style={{
+            fontSize: '11px', fontWeight: 600, padding: '4px 10px', borderRadius: '999px',
+            backgroundColor: 'var(--bg-tertiary)',
+            color: 'var(--text-secondary)',
+            border: '1px solid var(--border-primary)',
+            whiteSpace: 'nowrap',
+          }}>
+            {getSourceLabel(model.download_source)}
+          </span>
+        </div>
       </div>
 
       {/* Description */}
@@ -2784,7 +3162,7 @@ const ModelCard: React.FC<{
           </span>
         )}
         {model.parameters && (
-          <span style={{ fontSize: '12px', backgroundColor: 'rgba(99, 102, 241, 0.2)', padding: '2px 8px', borderRadius: '6px', color: 'var(--accent)', fontWeight: 600 }}>
+          <span style={{ fontSize: '12px', backgroundColor: 'var(--bg-tertiary)', padding: '2px 8px', borderRadius: '6px', color: 'var(--text-primary)', fontWeight: 600 }}>
             {model.parameters}
           </span>
         )}
@@ -2793,7 +3171,7 @@ const ModelCard: React.FC<{
           const paramMatch = model.name.match(/(\d+(?:\.\d+)?[BMK]?)(?:\s*params?|\s*parameters?|$)/i) ||
                              model.name.match(/(\d+(?:\.\d+)?B)\b/i);
           return paramMatch ? (
-            <span style={{ fontSize: '12px', backgroundColor: 'rgba(99, 102, 241, 0.2)', padding: '2px 8px', borderRadius: '6px', color: 'var(--accent)', fontWeight: 600 }}>
+            <span style={{ fontSize: '12px', backgroundColor: 'var(--bg-tertiary)', padding: '2px 8px', borderRadius: '6px', color: 'var(--text-primary)', fontWeight: 600 }}>
               {paramMatch[1].toUpperCase()}
             </span>
           ) : null;
@@ -2824,12 +3202,13 @@ const ModelCard: React.FC<{
           <div style={{ width: '100%', backgroundColor: 'var(--bg-tertiary)', borderRadius: '9999px', height: '10px', marginBottom: '10px', overflow: 'hidden' }}>
             <div style={{
               width: `${Math.min(download.percentage ?? 0, 100)}%`,
-              backgroundColor: download.status === 'Paused' ? '#f59e0b' : download.status === 'Queued' ? '#818cf8' : download.status === 'Failed' ? '#ef4444' : 'var(--accent)',
+              backgroundColor: 'var(--text-primary)',
+              opacity: download.status === 'Paused' ? 0.4 : download.status === 'Queued' ? 0.3 : 1,
               height: '10px', borderRadius: '9999px',
               transition: 'width 0.3s ease',
             }} />
           </div>
-          
+
           {/* Metrics Grid */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '8px' }}>
             <div style={{ textAlign: 'center' }}>
@@ -2861,11 +3240,11 @@ const ModelCard: React.FC<{
               justifyContent: 'center',
               gap: '6px',
               padding: '6px',
-              backgroundColor: 'rgba(99, 102, 241, 0.1)',
+              backgroundColor: 'var(--bg-tertiary)',
               borderRadius: '6px',
               marginBottom: '8px'
             }}>
-              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--accent)' }}>
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--text-muted)' }}>
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
@@ -2879,26 +3258,26 @@ const ModelCard: React.FC<{
           <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
             {download.status === 'Downloading' && (
               <button onClick={() => onPauseDownload(download.download_id)} style={{
-                display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 10px',
-                borderRadius: '6px', border: '1px solid var(--border-primary)', backgroundColor: 'transparent',
-                color: 'var(--text-secondary)', fontSize: '12px', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 12px',
+                borderRadius: '9999px', border: '1px solid var(--border-primary)', backgroundColor: 'transparent',
+                color: 'var(--text-primary)', fontSize: '12px', cursor: 'pointer', fontWeight: 500,
               }}>
                 <Pause size={12} /> Pause
               </button>
             )}
             {download.status === 'Paused' && (
               <button onClick={() => onResumeDownload(download.download_id)} style={{
-                display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 10px',
-                borderRadius: '6px', border: '1px solid var(--accent)', backgroundColor: 'var(--accent)',
-                color: '#fff', fontSize: '12px', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 12px',
+                borderRadius: '9999px', border: '1px solid var(--text-primary)', backgroundColor: 'var(--text-primary)',
+                color: 'var(--bg-primary)', fontSize: '12px', cursor: 'pointer', fontWeight: 500,
               }}>
                 <Play size={12} /> Resume
               </button>
             )}
             <button onClick={() => onCancelDownload(download.download_id)} style={{
-              display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 10px',
-              borderRadius: '6px', border: '1px solid var(--danger)', backgroundColor: 'transparent',
-              color: 'var(--danger)', fontSize: '12px', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 12px',
+              borderRadius: '9999px', border: '1px solid var(--border-primary)', backgroundColor: 'transparent',
+              color: 'var(--text-primary)', fontSize: '12px', cursor: 'pointer', fontWeight: 500,
             }}>
               <Square size={12} /> Stop
             </button>
@@ -2927,21 +3306,22 @@ const ModelCard: React.FC<{
                 style={{
                   display: 'flex', alignItems: 'center', gap: '6px',
                   padding: '8px 16px', borderRadius: '9999px',
-                  border: 'none',
-                  backgroundColor: isSelected || isActiveModel() ? '#166534' : '#22c55e',
-                  color: '#ffffff',
+                  border: '1px solid var(--text-primary)',
+                  backgroundColor: isSelected || isActiveModel() ? 'transparent' : 'var(--text-primary)',
+                  color: isSelected || isActiveModel() ? 'var(--text-primary)' : 'var(--bg-primary)',
                   fontSize: '12px', cursor: 'pointer', fontWeight: 600,
+                  height: '34px',
                 }}
               >
-                {isSelected || isActiveModel() ? '✓ Active Model' : 'Use Model'}
+                {isSelected || isActiveModel() ? '✓ Active' : 'Use Model'}
               </button>
               <button
                 onClick={() => onRemove(model.id)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: '6px',
-                  padding: '6px 14px', borderRadius: '8px', border: '1px solid #fca5a5',
-                  backgroundColor: 'transparent', color: 'var(--danger)', fontSize: '13px',
-                  cursor: 'pointer', fontWeight: 500,
+                  padding: '8px 14px', borderRadius: '9999px', border: '1px solid var(--border-primary)',
+                  backgroundColor: 'transparent', color: 'var(--text-secondary)', fontSize: '12px',
+                  cursor: 'pointer', fontWeight: 500, height: '34px',
                 }}
               >
                 <Trash2 size={14} /> Remove
@@ -2956,52 +3336,107 @@ const ModelCard: React.FC<{
                   setOrModalStep('choice');
                   return;
                 }
-                onSelectModel?.({ id: modelIdClean, name: model.name, source: 'openrouter' });
+                onSelectModel?.({ id: modelIdClean, name: model.name, source: 'openrouter', pricing: model.pricing });
                 // Switch to online mode since we're selecting an OpenRouter model
                 onToggleOnlineMode?.(true);
               }}
               style={{
                 display: 'flex', alignItems: 'center', gap: '6px',
                 padding: '8px 16px', borderRadius: '9999px',
-                border: 'none',
-                backgroundColor: isSelected ? '#000000' : hasApiKey ? '#000000' : '#1e40af',
-                color: '#ffffff',
-                fontSize: '12px', cursor: 'pointer', fontWeight: 600, fontFamily: 'sans-serif', textAlign: 'center',
-                height: '32px',
+                border: '1px solid var(--text-primary)',
+                backgroundColor: isSelected ? 'transparent' : 'var(--text-primary)',
+                color: isSelected ? 'var(--text-primary)' : 'var(--bg-primary)',
+                fontSize: '12px', cursor: 'pointer', fontWeight: 600, textAlign: 'center',
+                height: '34px',
               }}
             >
               {isSelected ? '✓ In Use' : !hasApiKey ? 'Get API Key' : 'Use Model'}
             </button>
           )}
-          {/* Non-OpenRouter available models: Install */}
-          {!isOpenRouter && isAvailable && (
-            <button
-              onClick={() => {
-                // Check if this is a HuggingFace model that might require authentication
-                if (model.download_source === 'huggingface') {
-                  // Use context value — always up to date, no stale localStorage reads.
-                  if (!ctxHfToken) {
+          {/* Non-OpenRouter available models: Install / gated flow */}
+          {!isOpenRouter && isAvailable && (() => {
+            const isHf = model.download_source === 'huggingface';
+            const isGated = !!model.is_gated;
+
+            // ── Gated: approved after polling → show Install Now ──
+            if (isGated && gatedAccessStatus === 'approved') {
+              return (
+                <button
+                  onClick={() => onInstall(model)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '6px',
+                    padding: '8px 16px', borderRadius: '9999px', border: '1px solid var(--text-primary)',
+                    backgroundColor: 'var(--text-primary)', color: 'var(--bg-primary)', fontSize: '12px',
+                    cursor: 'pointer', fontWeight: 600, height: '34px',
+                  }}
+                >
+                  <Download size={14} /> Install Now
+                </button>
+              );
+            }
+
+            // ── Gated: polling in progress ──
+            if (isGated && gatedAccessStatus === 'checking') {
+              return (
+                <button
+                  disabled
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '6px',
+                    padding: '8px 16px', borderRadius: '9999px', border: '1px solid var(--border-primary)',
+                    backgroundColor: 'transparent', color: 'var(--text-muted)', fontSize: '12px',
+                    cursor: 'not-allowed', fontWeight: 500, height: '34px', opacity: 0.7,
+                  }}
+                >
+                  <div style={{
+                    width: '12px', height: '12px',
+                    border: '2px solid var(--border-primary)',
+                    borderTop: '2px solid var(--text-primary)',
+                    borderRadius: '50%',
+                    animation: 'spin 0.8s linear infinite',
+                  }} />
+                  Checking…
+                </button>
+              );
+            }
+
+            // ── Gated: request access ──
+            if (isGated) {
+              return (
+                <button
+                  onClick={requestGatedAccess}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '6px',
+                    padding: '8px 16px', borderRadius: '9999px', border: '1px solid var(--border-primary)',
+                    backgroundColor: 'transparent', color: 'var(--text-primary)', fontSize: '12px',
+                    cursor: 'pointer', fontWeight: 600, height: '34px',
+                  }}
+                >
+                  Request Access
+                </button>
+              );
+            }
+
+            // ── Normal HuggingFace install ──
+            return (
+              <button
+                onClick={() => {
+                  if (isHf && !ctxHfToken) {
                     setHfModalStep('choice');
                   } else {
-                    // Token exists, proceed with installation
                     onInstall(model);
                   }
-                } else {
-                  // For non-HuggingFace models, proceed directly with installation
-                  onInstall(model);
-                }
-              }}
-              style={{
-                display: 'flex', alignItems: 'center', gap: '6px',
-                padding: '8px 16px', borderRadius: '9999px', border: 'none',
-                backgroundColor: '#000000', color: '#ffffff', fontSize: '12px',
-                cursor: 'pointer', fontWeight: 600,
-                height: '32px',
-              }}
-            >
-              <Download size={14} /> Install
-            </button>
-          )}
+                }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                  padding: '8px 16px', borderRadius: '9999px', border: '1px solid var(--text-primary)',
+                  backgroundColor: 'var(--text-primary)', color: 'var(--bg-primary)', fontSize: '12px',
+                  cursor: 'pointer', fontWeight: 600, height: '34px',
+                }}
+              >
+                <Download size={14} /> Install
+              </button>
+            );
+          })()}
         </div>
       )}
 
@@ -3012,10 +3447,11 @@ const ModelCard: React.FC<{
             disabled
             style={{
               display: 'flex', alignItems: 'center', gap: '6px',
-              padding: '6px 14px', borderRadius: '8px', border: 'none',
-              backgroundColor: download.status === 'Queued' ? '#818cf8' : '#3b82f6',
-              color: '#ffffff', fontSize: '13px',
-              cursor: 'not-allowed', fontWeight: 600, opacity: 0.8,
+              padding: '8px 16px', borderRadius: '9999px', border: '1px solid var(--border-primary)',
+              backgroundColor: 'transparent',
+              color: 'var(--text-muted)', fontSize: '12px',
+              cursor: 'not-allowed', fontWeight: 500, opacity: 0.7,
+              height: '34px',
             }}
           >
             {download.status === 'Queued' ? 'Queued...' : `Installing... ${(download.percentage ?? 0).toFixed(0)}%`}
@@ -3030,25 +3466,25 @@ const ModelCard: React.FC<{
           style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.55)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000, fontFamily: 'sans-serif' }}
           onClick={(e) => { if (e.target === e.currentTarget) closeOrModal(); }}
         >
-          <div style={{ background: 'white', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'black', position: 'relative' }}>
+          <div style={{ background: 'var(--bg-modal)', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'var(--text-primary)', position: 'relative' }}>
             {/* Close */}
-            <button onClick={closeOrModal} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
+            <button onClick={closeOrModal} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
             {orModalStep === 'choice' && (
               <>
-                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 12, textAlign: 'center', fontSize: 18 }}>OpenRouter API Key Needed</h3>
-                <p style={{ color: '#374151', textAlign: 'center', fontSize: 14, marginBottom: 20 }}>Access powerful AI models by adding your OpenRouter API key.</p>
+                <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 12, textAlign: 'center', fontSize: 18 }}>OpenRouter API Key Needed</h3>
+                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: 14, marginBottom: 20 }}>Access powerful AI models by adding your OpenRouter API key.</p>
                 <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
                   <button
                     onClick={() => { open('https://openrouter.ai/keys'); closeOrModal(); }}
-                    style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
-                    onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
-                    onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                    style={{ width: '42%', padding: '10px 16px', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-primary)', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                    onMouseOver={(e) => { e.currentTarget.style.background = 'var(--text-primary)'; e.currentTarget.style.color = 'var(--bg-modal)'; }}
+                    onMouseOut={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
                   >Create API Key</button>
                   <button
                     onClick={() => setOrModalStep('input')}
-                    style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
-                    onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
-                    onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                    style={{ width: '42%', padding: '10px 16px', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-primary)', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                    onMouseOver={(e) => { e.currentTarget.style.background = 'var(--text-primary)'; e.currentTarget.style.color = 'var(--bg-modal)'; }}
+                    onMouseOut={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
                   >Enter Existing Key</button>
                 </div>
               </>
@@ -3056,9 +3492,9 @@ const ModelCard: React.FC<{
             {orModalStep === 'input' && (
               <>
                 {/* Back */}
-                <button onClick={() => setOrModalStep('choice')} style={{ position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>←</button>
-                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 10, textAlign: 'center', fontSize: 18 }}>Enter OpenRouter API Key</h3>
-                <p style={{ color: '#374151', textAlign: 'center', fontSize: 13, marginBottom: 16 }}>
+                <button onClick={() => setOrModalStep('choice')} style={{ position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: '50%', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: 'none', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>←</button>
+                <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 10, textAlign: 'center', fontSize: 18 }}>Enter OpenRouter API Key</h3>
+                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: 13, marginBottom: 16 }}>
                   Paste your key below. Get one at{' '}
                   <a href="#" onClick={(e) => { e.preventDefault(); open('https://openrouter.ai/keys'); }} style={{ color: '#2563eb', textDecoration: 'none' }}>openrouter.ai/keys</a>
                 </p>
@@ -3069,7 +3505,7 @@ const ModelCard: React.FC<{
                   value={orKeyInput}
                   onChange={(e) => setOrKeyInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && saveOrKey()}
-                  style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${orKeyError ? '#ef4444' : '#d1d5db'}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 6, outline: 'none' }}
+                  style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${orKeyError ? '#ef4444' : 'var(--border-primary)'}`, background: 'var(--bg-input)', color: 'var(--text-primary)', fontSize: 14, boxSizing: 'border-box', marginBottom: 6, outline: 'none' }}
                 />
                 {orKeyInputError && (
                   <p style={{ color: '#ef4444', fontSize: '12px', marginBottom: 12, textAlign: 'center' }}>{orKeyInputError}</p>
@@ -3093,25 +3529,25 @@ const ModelCard: React.FC<{
           style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.55)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 10000, fontFamily: 'sans-serif' }}
           onClick={(e) => { if (e.target === e.currentTarget) closeHfModal(); }}
         >
-          <div style={{ background: 'white', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'black', position: 'relative' }}>
+          <div style={{ background: 'var(--bg-modal)', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '90vw', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', color: 'var(--text-primary)', position: 'relative' }}>
             {/* Close */}
-            <button onClick={closeHfModal} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
+            <button onClick={closeHfModal} style={{ position: 'absolute', top: 8, right: 8, width: 30, height: 30, borderRadius: '50%', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: 'none', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>×</button>
             {hfModalStep === 'choice' && (
               <>
-                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 12, textAlign: 'center', fontSize: 18 }}>HuggingFace Token Needed</h3>
-                <p style={{ color: '#374151', textAlign: 'center', fontSize: 14, marginBottom: 20 }}>Access gated models by adding your HuggingFace token.</p>
+                <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 12, textAlign: 'center', fontSize: 18 }}>HuggingFace Token Needed</h3>
+                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: 14, marginBottom: 20 }}>Access gated models by adding your HuggingFace token.</p>
                 <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
                   <button
                     onClick={() => { open('https://huggingface.co/settings/tokens'); closeHfModal(); }}
-                    style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
-                    onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
-                    onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                    style={{ width: '42%', padding: '10px 16px', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-primary)', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                    onMouseOver={(e) => { e.currentTarget.style.background = 'var(--text-primary)'; e.currentTarget.style.color = 'var(--bg-modal)'; }}
+                    onMouseOut={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
                   >Create API Key</button>
                   <button
                     onClick={() => setHfModalStep('input')}
-                    style={{ width: '42%', padding: '10px 16px', background: 'rgb(233,233,233)', color: 'black', border: 'none', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
-                    onMouseOver={(e) => { e.currentTarget.style.background = '#000'; e.currentTarget.style.color = '#fff'; }}
-                    onMouseOut={(e) => { e.currentTarget.style.background = 'rgb(233,233,233)'; e.currentTarget.style.color = 'black'; }}
+                    style={{ width: '42%', padding: '10px 16px', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid var(--border-primary)', borderRadius: 9999, cursor: 'pointer', fontWeight: 500, transition: 'all 0.15s' }}
+                    onMouseOver={(e) => { e.currentTarget.style.background = 'var(--text-primary)'; e.currentTarget.style.color = 'var(--bg-modal)'; }}
+                    onMouseOut={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
                   >Enter Existing Key</button>
                 </div>
               </>
@@ -3119,9 +3555,9 @@ const ModelCard: React.FC<{
             {hfModalStep === 'input' && (
               <>
                 {/* Back */}
-                <button onClick={() => setHfModalStep('choice')} style={{ position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: '50%', background: '#E5E7EB', color: '#374151', border: 'none', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>←</button>
-                <h3 style={{ color: 'black', marginTop: 0, marginBottom: 10, textAlign: 'center', fontSize: 18 }}>Enter HuggingFace Token</h3>
-                <p style={{ color: '#374151', textAlign: 'center', fontSize: 13, marginBottom: 16 }}>
+                <button onClick={() => setHfModalStep('choice')} style={{ position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: '50%', background: 'var(--bg-hover)', color: 'var(--text-primary)', border: 'none', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>←</button>
+                <h3 style={{ color: 'var(--text-primary)', marginTop: 0, marginBottom: 10, textAlign: 'center', fontSize: 18 }}>Enter HuggingFace Token</h3>
+                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: 13, marginBottom: 16 }}>
                   Paste your token below. Get one at{' '}
                   <a href="#" onClick={(e) => { e.preventDefault(); open('https://huggingface.co/settings/tokens'); }} style={{ color: '#2563eb', textDecoration: 'none' }}>huggingface.co/settings/tokens</a>
                 </p>
@@ -3132,7 +3568,7 @@ const ModelCard: React.FC<{
                   value={hfTokenInput}
                   onChange={(e) => setHfTokenInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && saveHfToken()}
-                  style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${hfTokenError ? '#ef4444' : '#d1d5db'}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 6, outline: 'none' }}
+                  style={{ width: '100%', padding: '12px 16px', borderRadius: 8, border: `1px solid ${hfTokenError ? '#ef4444' : 'var(--border-primary)'}`, background: 'var(--bg-input)', color: 'var(--text-primary)', fontSize: 14, boxSizing: 'border-box', marginBottom: 6, outline: 'none' }}
                 />
                 {hfTokenInputError && (
                   <p style={{ color: '#ef4444', fontSize: '12px', marginBottom: 12, textAlign: 'center' }}>{hfTokenInputError}</p>
@@ -3169,9 +3605,10 @@ const DownloadCard: React.FC<{
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
         <h3 style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)' }}>{download.model_name}</h3>
         <span style={{
-          fontSize: '12px', padding: '3px 10px', borderRadius: '12px', fontWeight: 500,
-          backgroundColor: download.status === 'Completed' ? '#dcfce7' : download.status === 'Downloading' ? '#dbeafe' : download.status === 'Failed' ? '#fee2e2' : download.status === 'Paused' ? '#fef9c3' : download.status === 'Queued' ? '#e0e7ff' : download.status === 'Starting' ? '#dbeafe' : 'var(--bg-tertiary)',
-          color: download.status === 'Completed' ? '#166534' : download.status === 'Downloading' ? '#1e40af' : download.status === 'Failed' ? '#991b1b' : download.status === 'Paused' ? '#854d0e' : download.status === 'Queued' ? '#4338ca' : download.status === 'Starting' ? '#1e40af' : 'var(--text-secondary)',
+          fontSize: '12px', padding: '3px 10px', borderRadius: '9999px', fontWeight: 500,
+          backgroundColor: 'var(--bg-tertiary)',
+          color: 'var(--text-secondary)',
+          border: '1px solid var(--border-primary)',
         }}>
           {download.status}
         </span>
@@ -3183,12 +3620,13 @@ const DownloadCard: React.FC<{
           <div style={{ width: '100%', backgroundColor: 'var(--bg-tertiary)', borderRadius: '9999px', height: '10px', marginBottom: '10px', overflow: 'hidden' }}>
             <div style={{
               width: `${Math.min(download.percentage ?? 0, 100)}%`,
-              backgroundColor: download.status === 'Paused' ? '#f59e0b' : download.status === 'Queued' ? '#818cf8' : 'var(--accent)',
+              backgroundColor: 'var(--text-primary)',
+              opacity: download.status === 'Paused' ? 0.4 : download.status === 'Queued' ? 0.3 : 1,
               height: '10px', borderRadius: '9999px',
               transition: 'width 0.3s ease',
             }} />
           </div>
-          
+
           {/* Download Metrics Grid */}
           <div style={{ 
             display: 'grid', 
@@ -3236,11 +3674,11 @@ const DownloadCard: React.FC<{
               justifyContent: 'center',
               gap: '6px',
               padding: '6px 12px',
-              backgroundColor: 'rgba(99, 102, 241, 0.1)',
+              backgroundColor: 'var(--bg-tertiary)',
               borderRadius: '6px',
               marginBottom: '10px'
             }}>
-              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--accent)' }}>
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--text-muted)' }}>
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
@@ -3255,26 +3693,26 @@ const DownloadCard: React.FC<{
           <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
             {download.status === 'Downloading' && (
               <button onClick={() => onPause(download.download_id)} style={{
-                display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 12px',
-                borderRadius: '6px', border: '1px solid var(--border-primary)', backgroundColor: 'transparent',
-                color: 'var(--text-secondary)', fontSize: '12px', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '4px', padding: '6px 14px',
+                borderRadius: '9999px', border: '1px solid var(--border-primary)', backgroundColor: 'transparent',
+                color: 'var(--text-primary)', fontSize: '12px', cursor: 'pointer', fontWeight: 500,
               }}>
                 <Pause size={14} /> Pause
               </button>
             )}
             {download.status === 'Paused' && (
               <button onClick={() => onResume(download.download_id)} style={{
-                display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 12px',
-                borderRadius: '6px', border: '1px solid var(--accent)', backgroundColor: 'var(--accent)',
-                color: '#fff', fontSize: '12px', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '4px', padding: '6px 14px',
+                borderRadius: '9999px', border: '1px solid var(--text-primary)', backgroundColor: 'var(--text-primary)',
+                color: 'var(--bg-primary)', fontSize: '12px', cursor: 'pointer', fontWeight: 500,
               }}>
                 <Play size={14} /> Resume
               </button>
             )}
             <button onClick={() => onCancel(download.download_id)} style={{
-              display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 12px',
-              borderRadius: '6px', border: '1px solid var(--danger)', backgroundColor: 'transparent',
-              color: 'var(--danger)', fontSize: '12px', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: '4px', padding: '6px 14px',
+              borderRadius: '9999px', border: '1px solid var(--border-primary)', backgroundColor: 'transparent',
+              color: 'var(--text-primary)', fontSize: '12px', cursor: 'pointer', fontWeight: 500,
             }}>
               <Square size={14} /> Stop
             </button>

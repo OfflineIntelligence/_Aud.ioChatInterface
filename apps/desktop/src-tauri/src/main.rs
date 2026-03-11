@@ -122,6 +122,24 @@ fn fatal_error(message: &str) -> ! {
     std::process::exit(1);
 }
 
+/// Kill any orphan llama-server processes left over from a previous run.
+/// Called once at startup before the backend thread is spawned so the
+/// new llama-server can always bind to its configured port.
+fn kill_orphan_llama_servers() {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", "llama-server.exe", "/T"])
+            .output();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("pkill")
+            .args(["-9", "llama-server"])
+            .output();
+    }
+}
+
 fn main() {
     log_startup("=== Aud.io Starting ===");
     log_startup(&format!("Current directory: {:?}", std::env::current_dir().unwrap_or_default()));
@@ -130,6 +148,12 @@ fn main() {
     log_startup("Build mode: DEBUG");
     #[cfg(not(debug_assertions))]
     log_startup("Build mode: RELEASE");
+
+    // Kill any orphan llama-server processes from a previous run before the
+    // new backend tries to bind the same port.  This is a no-op when no
+    // orphan exists (taskkill/pkill exit with a non-zero code which we ignore).
+    kill_orphan_llama_servers();
+    log_startup("Orphan llama-server cleanup done");
 
     // Single-instance lock: prevent multiple instances from running
     // This uses a lock file in the user data directory
@@ -300,9 +324,46 @@ fn main() {
                 let health_url = format!("http://127.0.0.1:{}/healthz", actual_port);
                 match client.get(&health_url).send().await {
                     Ok(response) if response.status().is_success() => {
-                        eprintln!("Backend service is ready on port {}!", actual_port);
-                        let _ = ready_tx.send(true);
-                        break;
+                        // Parse the JSON body — only open the Tauri window when the
+                        // backend signals "ready" or "degraded" (init complete but no
+                        // model loaded).  "initializing" means the background task
+                        // hasn't called mark_initialization_complete() yet; keep waiting.
+                        match response.text().await {
+                            Ok(body) => {
+                                let status = serde_json::from_str::<serde_json::Value>(&body)
+                                    .ok()
+                                    .and_then(|v| v["status"].as_str().map(String::from));
+                                match status.as_deref() {
+                                    Some("ready") | Some("degraded") => {
+                                        eprintln!("Backend ready (status: {}) on port {}!", status.as_deref().unwrap_or("?"), actual_port);
+                                        let _ = ready_tx.send(true);
+                                        break;
+                                    }
+                                    _ => {
+                                        // Still initializing (or unknown status) — keep polling.
+                                        if body.trim() == "OK" {
+                                            // Legacy plain-text response
+                                            eprintln!("Backend ready (legacy OK) on port {}!", actual_port);
+                                            let _ = ready_tx.send(true);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                // Body read failed; treat as "still initializing".
+                            }
+                        }
+                        attempts += 1;
+                        if attempts % 10 == 0 {
+                            eprintln!("Health check: still initializing (attempt {}/{})", attempts, max_attempts);
+                        }
+                        if attempts >= max_attempts {
+                            eprintln!("Backend failed to become ready after {} attempts", max_attempts);
+                            let _ = ready_tx.send(false);
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                     }
                     Ok(response) => {
                         attempts += 1;
@@ -397,28 +458,52 @@ fn main() {
     // Run with exit handler for graceful shutdown
     let shutdown_port = actual_port;
     log_startup("Running Tauri event loop...");
-    
-    // Run the app - it blocks until the app exits
-    // Any errors during run will be logged by Tauri
+
     app.run(move |_app_handle, event| {
         if let tauri::RunEvent::ExitRequested { .. } = event {
-            eprintln!("App exit requested, flushing KV cache...");
+            eprintln!("App exit requested — starting graceful shutdown");
+
+            // 1. Ask the backend to flush the KV cache and stop the runtime.
+            //    3-second timeout: if the backend doesn't respond quickly we
+            //    still proceed (the force-kill below covers orphan processes).
             let url = format!("http://127.0.0.1:{}/admin/shutdown", shutdown_port);
             let _ = reqwest::blocking::Client::new()
                 .post(&url)
-                .timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(3))
                 .send();
-            eprintln!("Shutdown signal sent");
+            eprintln!("Backend shutdown signal sent");
 
-            // Clean up lock file
+            // 2. Safety net: force-kill any llama-server process that the
+            //    graceful shutdown may have missed (e.g. Arc::try_unwrap
+            //    still failing because a concurrent request holds a reference).
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/IM", "llama-server.exe", "/T"])
+                    .output();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("pkill")
+                    .args(["-9", "llama-server"])
+                    .output();
+            }
+            eprintln!("llama-server force-kill done");
+
+            // 3. Remove the instance lock file.
             if let Some(base_dir) = get_data_dir() {
                 let lock_file = base_dir.join("app.lock");
-                if let Err(e) = std::fs::remove_file(&lock_file) {
-                    eprintln!("Warning: Could not remove lock file: {}", e);
-                } else {
-                    eprintln!("Instance lock released");
-                }
+                let _ = std::fs::remove_file(&lock_file);
             }
+            eprintln!("Instance lock released");
+
+            // 4. Force-terminate the entire process.
+            //    Without this, background Tokio threads (axum::serve) can keep
+            //    the process alive in Task Manager after the window is closed,
+            //    which causes port conflicts and a stuck loading screen on the
+            //    next launch.
+            eprintln!("Forcing process exit");
+            std::process::exit(0);
         }
     });
 }

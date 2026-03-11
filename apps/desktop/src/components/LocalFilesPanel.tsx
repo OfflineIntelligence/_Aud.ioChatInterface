@@ -288,30 +288,31 @@ const AllFilesTab: React.FC = () => {
         </div>
       )}
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 20px', borderBottom: '1px solid var(--border-primary)', flexShrink: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', padding: '16px 20px', borderBottom: '1px solid var(--border-primary)', flexShrink: 0 }}>
+        <button
+          className="header-button"
+          title="Upload individual files"
+          onClick={() => triggerUpload(null, false)}
+          style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 20px', borderRadius: '8px', border: '1px solid #000', backgroundColor: '#000', color: '#fff' }}
+        >
+          <Upload size={15} />
+          <span style={{ fontSize: '13px', fontWeight: 600 }}>Upload Files</span>
+        </button>
+        <button
+          className="header-button"
+          title="Upload folder with all contents"
+          onClick={() => triggerUpload(null, true)}
+          style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 20px', borderRadius: '8px', border: '1px solid #000', backgroundColor: '#000', color: '#fff' }}
+        >
+          <Folder size={15} />
+          <span style={{ fontSize: '13px', fontWeight: 600 }}>Upload Folder</span>
+        </button>
+      </div>
+
+      <div style={{ padding: '8px 20px', borderBottom: '1px solid var(--border-primary)', flexShrink: 0, textAlign: 'center' }}>
         <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-          {totalFiles} file{totalFiles !== 1 ? 's' : ''} • Stored in AppData/Aud.io/all_files/
+          {totalFiles} file{totalFiles !== 1 ? 's' : ''} stored in AppData/Aud.io/all_files/
         </span>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px' }}>
-          <button
-            className="header-button"
-            title="Upload individual files"
-            onClick={() => triggerUpload(null, false)}
-            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
-          >
-            <Upload size={15} />
-            <span style={{ fontSize: '13px' }}>Upload Files</span>
-          </button>
-          <button
-            className="header-button"
-            title="Upload folder with all contents"
-            onClick={() => triggerUpload(null, true)}
-            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
-          >
-            <Upload size={15} />
-            <span style={{ fontSize: '13px' }}>Upload Folder</span>
-          </button>
-        </div>
       </div>
 
       <div style={{ padding: '8px 20px', backgroundColor: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-primary)', flexShrink: 0, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>

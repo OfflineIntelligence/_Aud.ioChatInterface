@@ -22,6 +22,18 @@ extern "C" {
     fn CGPDFPageRelease(page: *mut std::ffi::c_void);
 }
 
+/// Returns `true` when `file_processor` returned a sentinel error string instead of
+/// real content. Sentinels always start with `[` and describe a failure.
+/// Used by both `stream_api` (cache-hit guard) and `attachment_api` (preprocess guard).
+pub fn is_extraction_sentinel(s: &str) -> bool {
+    s.starts_with("[Could not")
+        || s.starts_with("[PDF")
+        || s.starts_with("[DOCX")
+        || s.starts_with("[Spreadsheet")
+        || s.starts_with("[Presentation")
+        || s.starts_with("[ODT")
+}
+
 /// Rough token estimate: 1 token ≈ 4 characters (common approximation).
 pub fn estimate_tokens(text: &str) -> usize {
     (text.len() + 3) / 4
@@ -134,7 +146,80 @@ async fn extract_pdf_content(file_path: &Path) -> Result<String> {
     Ok(text)
 }
 
+/// Try to extract the embedded text layer from a PDF using pure Rust (no OCR required).
+///
+/// Works for text-based PDFs produced by Word, Google Docs, LibreOffice, LaTeX, etc.
+/// Returns `None` for scanned / image-only PDFs (no text layer) or on parse failure.
+///
+/// This is cross-platform and avoids the OS-specific OCR engines entirely for the
+/// majority of PDFs that users actually attach (digital documents, not scans).
+fn extract_pdf_text_layer(bytes: &[u8]) -> Option<String> {
+    let doc = lopdf::Document::load_mem(bytes).ok()?;
+    let page_count = doc.get_pages().len();
+    if page_count == 0 {
+        return None;
+    }
+
+    // Primary: extract all pages at once (fast path)
+    let page_numbers: Vec<u32> = (1..=page_count as u32).collect();
+    let full_text = doc.extract_text(&page_numbers).ok();
+
+    // Fallback: if full extraction fails or returns empty, try page-by-page
+    // (handles some PDFs where certain pages fail to decode as a batch)
+    let text = match full_text {
+        Some(ref t) if !t.trim().is_empty() => t.clone(),
+        _ => {
+            debug!("Full-document lopdf extraction returned empty — trying page-by-page");
+            let mut page_text = String::new();
+            for page_num in 1..=page_count as u32 {
+                if let Ok(t) = doc.extract_text(&[page_num]) {
+                    page_text.push_str(t.trim());
+                    page_text.push('\n');
+                }
+            }
+            page_text
+        }
+    };
+
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Sanity-check: if fewer than 40% of characters are printable the text layer
+    // is likely garbage from a non-standard font encoding — fall back to OCR.
+    // Threshold relaxed from 60% → 40% to handle technical PDFs with many
+    // non-ASCII symbols (math formulae, source code with special chars, etc.).
+    let total = trimmed.chars().count();
+    if total > 0 {
+        let printable = trimmed
+            .chars()
+            .filter(|c| !c.is_control() || matches!(*c, '\n' | '\r' | '\t'))
+            .count();
+        if printable * 100 / total < 40 {
+            info!(
+                "PDF text layer looks garbled ({}/{} printable chars) — will try OCR fallback",
+                printable, total
+            );
+            return None;
+        }
+    }
+
+    info!("PDF text layer extracted ({} chars, {} pages) — no OCR needed", trimmed.len(), page_count);
+    Some(trimmed)
+}
+
 fn extract_pdf_from_bytes(bytes: &[u8]) -> String {
+    // ── 1. Fast path: pure Rust text-layer extraction ────────────────────────
+    // Works for text-based PDFs (Word/Google Docs exports, LaTeX, etc.).
+    // Cross-platform — no OS OCR engine required.
+    if let Some(text) = extract_pdf_text_layer(bytes) {
+        return text;
+    }
+
+    info!("PDF has no extractable text layer — attempting OS-native OCR");
+
+    // ── 2. Slow path: OS-native OCR (for scanned / image-based PDFs) ─────────
     #[cfg(target_os = "windows")]
     {
         match windows_ocr_pdf(bytes) {
@@ -143,10 +228,10 @@ fn extract_pdf_from_bytes(bytes: &[u8]) -> String {
                 return text;
             }
             Some(_) => {
-                info!("Windows OCR returned empty text - PDF may be image-based");
+                info!("Windows OCR returned empty text — PDF may be purely image-based");
             }
             None => {
-                info!("Windows OCR failed - PDF may be encrypted or corrupted");
+                info!("Windows OCR unavailable or failed — PDF may be encrypted or corrupted");
             }
         }
     }
@@ -159,16 +244,16 @@ fn extract_pdf_from_bytes(bytes: &[u8]) -> String {
                 return text;
             }
             Some(_) => {
-                info!("macOS OCR returned empty text - PDF may be image-based");
+                info!("macOS OCR returned empty text — PDF may be purely image-based");
             }
             None => {
-                info!("macOS OCR failed - PDF may be encrypted or corrupted");
+                info!("macOS OCR unavailable or failed — PDF may be encrypted or corrupted");
             }
         }
     }
 
-    // All OCR strategies exhausted
-    "[PDF extraction failed. This file appears to be scanned, encrypted, or corrupted. 
+    // All strategies exhausted
+    "[PDF extraction failed. This file appears to be scanned, encrypted, or corrupted. \
 Please try: 1) Save as text-based PDF, 2) Use DOCX format, or 3) Paste text directly]".to_string()
 }
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { ChatWindow } from './components/ChatWindow'
 import { Sidebar } from './components/Sidebar'
 import { SearchModal } from './components/SearchModal'
@@ -17,6 +17,8 @@ import type { Chat } from './components/ChatWindow'
 import type { Message } from './api/chat'
 import { fetchConversations, fetchConversation, deleteConversation, updateConversationPinned } from './api/chat'
 import { getApiBaseSync } from './api/backendUrl'
+import { useNotifications } from './contexts/NotificationContext'
+import { downloadModel, getInterruptedDownloads, removeInterruptedDownload, resumeDownload } from './api/models'
 import { useApiKeys } from './contexts/ApiKeyContext'
 import './App.css'
 
@@ -58,6 +60,7 @@ function MainApp() {
     id: string;
     name: string;
     source: 'local' | 'openrouter';
+    pricing?: { prompt: string; completion: string };
   } | null>(() => {
     try {
       const saved = localStorage.getItem('aud-io-selected-model');
@@ -92,13 +95,13 @@ function MainApp() {
     if (currentSessionId) {
       localStorage.setItem('aud-io-active-session', currentSessionId);
       setActiveSessionId(currentSessionId);
-      
+
       // Get title from first user message if no title generated yet
       const firstUserMessage = currentMessages.find(m => m.role === 'user');
-      const chatTitle = firstUserMessage 
+      const chatTitle = firstUserMessage
         ? firstUserMessage.content.slice(0, 50) + (firstUserMessage.content.length > 50 ? '...' : '')
         : (currentChatTitle || 'New conversation');
-      
+
       // Also add to chats if not already there (for sessions without titles)
       setChats(prev => {
         if (!prev.find(c => c.id === currentSessionId)) {
@@ -133,6 +136,94 @@ function MainApp() {
   // Global download progress tracking for notification bubble
   const [globalDownloads, setGlobalDownloads] = useState<{ download_id: string; model_name: string; status: string; percentage: number; bytes_downloaded: number; total_bytes?: number; speed_bps: number }[]>([]);
   const [showDownloadBubble, setShowDownloadBubble] = useState(true);
+  const [modelsInitialTab, setModelsInitialTab] = useState<'installed' | 'available' | 'downloads'>('available');
+
+  // Track active download IDs to detect completions
+  const prevActiveDownloadIdsRef = useRef<Map<string, string>>(new Map()); // download_id → model_name
+  const notifiedCompletionsRef = useRef<Set<string>>(new Set()); // download_ids already notified
+  // Startup interrupted-download check fires only once
+  const hasCheckedInterruptedRef = useRef(false);
+
+  const { addNotification } = useNotifications();
+
+  // Stable callback so the effect below doesn't re-run on every render
+  const handleDownloadComplete = useCallback((modelName: string) => {
+    // Clear from interrupted-downloads so we don't prompt to resume a finished model
+    removeInterruptedDownload(modelName);
+    addNotification({
+      type: 'success',
+      title: 'Download Complete',
+      message: modelName,
+      duration: 12000,
+      actions: [
+        {
+          label: 'Activate',
+          isPrimary: true,
+          onClick: () => {
+            setModelsInitialTab('installed');
+            setActiveView('models');
+          },
+        },
+      ],
+    });
+  }, [addNotification]);
+
+  // Show resume prompts for downloads that were interrupted when app was last closed
+  const checkInterruptedDownloads = useCallback(() => {
+    const interrupted = getInterruptedDownloads();
+    if (interrupted.length === 0) return;
+    interrupted.forEach(dl => {
+      addNotification({
+        type: 'download',
+        title: 'Resume Download?',
+        message: `${dl.model_name} was interrupted`,
+        duration: 0, // persistent — user must act
+        actions: [
+          {
+            label: 'Resume',
+            isPrimary: true,
+            onClick: async () => {
+              const ok = await resumeDownload(dl);
+              if (ok) {
+                setModelsInitialTab('downloads');
+                setActiveView('models');
+                setShowDownloadBubble(true);
+              }
+            },
+          },
+          {
+            label: 'Dismiss',
+            isPrimary: false,
+            onClick: () => removeInterruptedDownload(dl.model_id),
+          },
+        ],
+      });
+    });
+  }, [addNotification]);
+
+  useEffect(() => {
+    const prev = prevActiveDownloadIdsRef.current;
+    const activeIds = new Set(
+      globalDownloads
+        .filter(d => d.status === 'Downloading' || d.status === 'Starting')
+        .map(d => d.download_id)
+    );
+
+    // For each previously-active download that is no longer active → completed
+    prev.forEach((modelName, downloadId) => {
+      if (!activeIds.has(downloadId) && !notifiedCompletionsRef.current.has(downloadId)) {
+        notifiedCompletionsRef.current.add(downloadId);
+        handleDownloadComplete(modelName);
+      }
+    });
+
+    // Update prev map to current active set
+    const newMap = new Map<string, string>();
+    globalDownloads
+      .filter(d => d.status === 'Downloading' || d.status === 'Starting')
+      .forEach(d => newMap.set(d.download_id, d.model_name));
+    prevActiveDownloadIdsRef.current = newMap;
+  }, [globalDownloads, handleDownloadComplete]);
 
   useEffect(() => {
     const pollDownloads = async () => {
@@ -141,13 +232,19 @@ function MainApp() {
         if (res.ok) {
           const data = await res.json();
           setGlobalDownloads(data);
+          // On first successful backend contact, check for interrupted downloads
+          if (!hasCheckedInterruptedRef.current) {
+            hasCheckedInterruptedRef.current = true;
+            // Small delay so the app UI is fully ready before showing notifications
+            setTimeout(checkInterruptedDownloads, 800);
+          }
         }
       } catch { /* ignore */ }
     };
     const interval = setInterval(pollDownloads, 3000);
     pollDownloads();
     return () => clearInterval(interval);
-  }, []);
+  }, [checkInterruptedDownloads]);
 
 
   const activeGlobalDownloads = globalDownloads.filter(d => d.status === 'Downloading' || d.status === 'Starting');
@@ -181,7 +278,7 @@ function MainApp() {
           pinned: conv.pinned,
         }));
         setChats(loadedChats);
-        
+
         // Restore active session if we have one saved
         const savedSessionId = localStorage.getItem('aud-io-active-session');
         if (savedSessionId) {
@@ -408,14 +505,15 @@ function MainApp() {
       case 'models':
         return <ModelsPanel
           isOpen={activeView === 'models'}
-          onClose={() => setActiveView('chat')}
+          onClose={() => { setActiveView('chat'); setModelsInitialTab('available'); }}
           selectedModel={selectedModel}
-          onSelectModel={(model) => { setSelectedModel(model); if (model) setActiveView('chat'); }}
+          onSelectModel={(model) => { setSelectedModel(model); if (model) { setActiveView('chat'); setModelsInitialTab('available'); } }}
           openRouterApiKey={openRouterApiKey}
           onOpenRouterApiKeyChange={setOpenRouterApiKey}
           onToggleOnlineMode={setIsOnlineMode}
           focusApiKeyInput={shouldFocusApiKey}
           focusHfTokenInput={shouldFocusHfToken}
+          initialTab={modelsInitialTab}
         />;
 
       case 'settings':
@@ -462,6 +560,10 @@ function MainApp() {
             onSelectedModelChange={setSelectedModel}
             onOpenModels={(focusApiKey = false, focusHfToken = false) => {
               openModelsWithFocus(focusApiKey, focusHfToken);
+            }}
+            onDownloadModel={async (modelId, modelName) => {
+              // Trigger background download — progress visible in the download bubble
+              await downloadModel(modelId, modelName);
             }}
           />
         );
@@ -536,7 +638,7 @@ function MainApp() {
               {activeGlobalDownloads.length} download{activeGlobalDownloads.length > 1 ? 's' : ''} in progress
             </span>
             <div style={{ display: 'flex', gap: '4px' }}>
-              <button className="download-bubble-close" onClick={() => setActiveView('models')} style={{ fontSize: '12px' }}>
+              <button className="download-bubble-close" onClick={() => { setModelsInitialTab('downloads'); setActiveView('models'); }} style={{ fontSize: '12px' }}>
                 View
               </button>
               <button className="download-bubble-close" onClick={() => setShowDownloadBubble(false)}>

@@ -83,6 +83,51 @@ async function checkBackendReadiness(maxRetries = 3, delayMs = 500): Promise<boo
     return false;
 }
 
+/**
+ * Classify an OpenRouter error code + message string into one of the known
+ * error_type values used by OpenRouterErrorCard.
+ * Mirrors the Rust classify_openrouter_error() helper in stream_api.rs.
+ */
+function classifyOpenRouterStreamError(code: number, msg: string): string {
+    const m = msg.toLowerCase();
+    if (
+        code === 402 ||
+        m.includes('credit') ||
+        m.includes('insufficient') ||
+        m.includes('balance') ||
+        m.includes('billing') ||
+        m.includes('quota')
+    ) return 'insufficient_credits';
+
+    if (
+        (code === 400 || code === 413) &&
+        (m.includes('context') || m.includes('too long') || m.includes('token') || m.includes('length'))
+    ) return 'context_exceeded';
+
+    if (
+        code === 429 ||
+        m.includes('rate limit') ||
+        m.includes('rate_limit') ||
+        m.includes('too many request')
+    ) return 'rate_limit';
+
+    if (
+        code === 401 ||
+        (m.includes('invalid') && (m.includes('key') || m.includes('api'))) ||
+        m.includes('unauthorized') ||
+        m.includes('authentication')
+    ) return 'invalid_key';
+
+    if (
+        m.includes('not enabled') ||
+        m.includes('developer instruction') ||
+        m.includes('not supported') ||
+        (m.includes('invalid request') && (m.includes('model') || m.includes('instruction')))
+    ) return 'model_restriction';
+
+    return 'generic';
+}
+
 // Stream assistant tokens via Server-Sent Events (delta chunks)
 export async function* streamChat(messages: Message[], sessionId?: string, _onlineMode?: boolean, modelId?: string, attachments?: ChatAttachment[], apiKey?: string): AsyncGenerator<string, void, unknown> {
     // Enforce session ID requirement for persistence - prevents orphaned conversations
@@ -131,6 +176,24 @@ export async function* streamChat(messages: Message[], sessionId?: string, _onli
         let errorMessage = `HTTP error! status: ${response.status}`;
 
         if (response.status === 502 || response.status === 503) {
+            // For online (OpenRouter) mode the backend returns structured JSON with
+            // an `error_type` field.  Try to parse it before falling back to the
+            // generic offline "Model Not Ready" message.
+            try {
+                const bodyText = await response.text();
+                const errorData = JSON.parse(bodyText);
+                if (errorData.error_type) {
+                    // Throw a sentinel string that ChatWindow detects and renders
+                    // as a typed error card instead of plain text.
+                    throw new Error(`__OPENROUTER_ERROR__:${errorData.error_type}:${errorData.message}`);
+                }
+            } catch (parseErr) {
+                // Re-throw our sentinel; silently swallow genuine JSON parse failures.
+                if (parseErr instanceof Error && parseErr.message.startsWith('__OPENROUTER_ERROR__')) {
+                    throw parseErr;
+                }
+            }
+            // Not a structured OpenRouter error (local 503, etc.) — keep existing message.
             errorMessage = 'Model Not Ready: No model is currently loaded. Please go to the Models page and activate a model by clicking "Active Model".';
         } else if (response.status === 504) {
             errorMessage = 'Gateway Timeout: The model took too long to respond. It may be too large for your hardware.';
@@ -169,11 +232,35 @@ export async function* streamChat(messages: Message[], sessionId?: string, _onli
                     if (jsonStr === '[DONE]') continue;
 
                     const data = JSON.parse(jsonStr);
+
+                    // OpenRouter (and the backend's stream-error wrapper) may deliver
+                    // an error as a normal SSE data event when the HTTP response is 200.
+                    // e.g.  data: {"error":{"message":"quota exceeded","code":402}}
+                    // e.g.  data: {"error":"Stream read error: ..."}  (backend wrapper)
+                    // Also handles edge case where choices is an empty array [].
+                    // Detect these and surface them as a typed error card rather than
+                    // silently ignoring the event and leaving a blank chat bubble.
+                    if (data.error && !data.choices?.length) {
+                        const errObj = typeof data.error === 'object'
+                            ? data.error
+                            : { message: String(data.error), code: 0 };
+                        const errCode = typeof errObj.code === 'number' ? errObj.code : 0;
+                        const errMsg  = typeof errObj.message === 'string'
+                            ? errObj.message
+                            : JSON.stringify(errObj);
+                        const errorType = classifyOpenRouterStreamError(errCode, errMsg);
+                        throw new Error(`__OPENROUTER_ERROR__:${errorType}:${errMsg}`);
+                    }
+
                     const content = data.choices?.[0]?.delta?.content;
                     if (content) {
                         yield content;
                     }
                 } catch (e) {
+                    // Re-throw our structured sentinel — must not swallow it.
+                    if (e instanceof Error && e.message.startsWith('__OPENROUTER_ERROR__')) {
+                        throw e;
+                    }
                     console.error('Error parsing SSE line:', e);
                 }
             }
@@ -244,12 +331,31 @@ export async function* streamChatOpenRouter(
                     const jsonStr = trimmed.slice(6);
                     if (jsonStr === '[DONE]') continue;
                     const data = JSON.parse(jsonStr);
+
+                    // Detect inline stream errors (same logic as streamChat above).
+                    // Also handles edge case where choices is an empty array [].
+                    if (data.error && !data.choices?.length) {
+                        const errObj = typeof data.error === 'object'
+                            ? data.error
+                            : { message: String(data.error), code: 0 };
+                        const errCode = typeof errObj.code === 'number' ? errObj.code : 0;
+                        const errMsg  = typeof errObj.message === 'string'
+                            ? errObj.message
+                            : JSON.stringify(errObj);
+                        const errorType = classifyOpenRouterStreamError(errCode, errMsg);
+                        throw new Error(`__OPENROUTER_ERROR__:${errorType}:${errMsg}`);
+                    }
+
                     const content = data.choices?.[0]?.delta?.content;
                     if (content) {
                         yield content;
                     }
-                } catch {
-                    // Skip parse errors on SSE lines
+                } catch (e) {
+                    // Re-throw our structured sentinel — must not swallow it.
+                    if (e instanceof Error && e.message.startsWith('__OPENROUTER_ERROR__')) {
+                        throw e;
+                    }
+                    // Skip genuine JSON parse errors on SSE lines
                 }
             }
         }

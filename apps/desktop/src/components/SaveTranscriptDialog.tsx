@@ -2,10 +2,7 @@
 // Allows users to select a directory and specify filename before saving transcript
 import { useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { writeTextFile, BaseDirectory } from '@tauri-apps/plugin-fs';
-import { save } from '@tauri-apps/plugin-dialog';
-import { Buffer } from 'buffer';
-
+import { writeTextFile } from '@tauri-apps/plugin-fs';
 // Import docx and jsPDF functionality
 import { Document as DocxDocument, Paragraph as DocxParagraph } from 'docx';
 import { jsPDF } from 'jspdf';
@@ -73,12 +70,12 @@ export function SaveTranscriptDialog({ open: isOpen, defaultFileName, content, o
               ],
             }],
           });
-          
+
           // Generate the docx buffer
           const { Packer } = await import('docx');
           const buffer = await Packer.toBuffer(doc);
           const fileData = new Uint8Array(buffer);
-          
+
           // Write binary data to file
           const fs = await import('@tauri-apps/plugin-fs');
           await fs.writeFile(fullPath, fileData);
@@ -91,7 +88,7 @@ export function SaveTranscriptDialog({ open: isOpen, defaultFileName, content, o
           pdf.text(textLines, 10, 10);
           const pdfArrayBuffer = pdf.output('arraybuffer');
           const fileData = new Uint8Array(pdfArrayBuffer as ArrayBuffer);
-          
+
           // Write binary data to file
           const fs = await import('@tauri-apps/plugin-fs');
           await fs.writeFile(fullPath, fileData);
@@ -100,7 +97,7 @@ export function SaveTranscriptDialog({ open: isOpen, defaultFileName, content, o
         default:
           await writeTextFile(fullPath, content);
       }
-      
+
       onSaved?.(fullPath);
       onClose();
     } catch (e: unknown) {
@@ -112,22 +109,43 @@ export function SaveTranscriptDialog({ open: isOpen, defaultFileName, content, o
 
   return (
     <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
+      position: 'fixed', inset: 0, background: 'var(--bg-overlay)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
     }}>
-      <div style={{ background: '#fff', width: 520, maxWidth: '90vw', borderRadius: 12, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' }}>
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid #eee', fontWeight: 600 }}>Save Transcript</div>
+      <div style={{
+        background: 'var(--bg-modal)',
+        width: 520,
+        maxWidth: '90vw',
+        borderRadius: 12,
+        boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+        border: '1px solid var(--border-primary)',
+      }}>
+        <div style={{
+          padding: '16px 20px',
+          borderBottom: '1px solid var(--border-primary)',
+          fontWeight: 600,
+          color: 'var(--text-primary)',
+        }}>Save Transcript</div>
         <div style={{ padding: 20 }}>
           <div style={{ marginBottom: 12 }}>
-            <label style={{ display: 'block', fontSize: 12, color: '#555', marginBottom: 6 }}>File name</label>
+            <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>File name</label>
             <input
               value={fileName}
               onChange={(e) => setFileName(e.target.value)}
               placeholder="chat-YYYY-MM-DD.txt"
-              style={{ width: '100%', padding: '10px 12px', border: '1px solid #ddd', borderRadius: 8 }}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                border: '1px solid var(--border-primary)',
+                borderRadius: 8,
+                background: 'var(--bg-input)',
+                color: 'var(--text-primary)',
+                boxSizing: 'border-box',
+                outline: 'none',
+              }}
             />
           </div>
           <div style={{ marginBottom: 12 }}>
-            <label style={{ display: 'block', fontSize: 12, color: '#555', marginBottom: 6 }}>File format</label>
+            <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>File format</label>
             <div style={{ display: 'flex', gap: 8 }}>
               {(['txt', 'docx', 'pdf'] as const).map((format) => (
                 <button
@@ -138,9 +156,9 @@ export function SaveTranscriptDialog({ open: isOpen, defaultFileName, content, o
                     flex: 1,
                     padding: '8px 12px',
                     borderRadius: 6,
-                    border: fileFormat === format ? '2px solid #0c6' : '1px solid #ddd',
-                    background: fileFormat === format ? '#f0f9ff' : '#fff',
-                    color: fileFormat === format ? '#0c6' : '#333',
+                    border: fileFormat === format ? '2px solid var(--text-primary)' : '1px solid var(--border-primary)',
+                    background: fileFormat === format ? 'var(--bg-tertiary)' : 'var(--bg-modal)',
+                    color: fileFormat === format ? 'var(--text-primary)' : 'var(--text-secondary)',
                     fontWeight: fileFormat === format ? 600 : 400,
                     cursor: 'pointer',
                   }}
@@ -151,26 +169,73 @@ export function SaveTranscriptDialog({ open: isOpen, defaultFileName, content, o
             </div>
           </div>
           <div style={{ marginBottom: 12 }}>
-            <label style={{ display: 'block', fontSize: 12, color: '#555', marginBottom: 6 }}>Folder</label>
+            <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>Folder</label>
             <div style={{ display: 'flex', gap: 8 }}>
               <input
                 readOnly
                 value={directory ?? ''}
                 placeholder="No folder selected"
-                style={{ flex: 1, padding: '10px 12px', border: '1px solid #ddd', borderRadius: 8, background: '#fafafa' }}
+                style={{
+                  flex: 1,
+                  padding: '10px 12px',
+                  border: '1px solid var(--border-primary)',
+                  borderRadius: 8,
+                  background: 'var(--bg-secondary)',
+                  color: 'var(--text-secondary)',
+                  outline: 'none',
+                }}
               />
-              <button onClick={pickDirectory} style={{ padding: '10px 14px', borderRadius: 8, border: '1px solid #ddd', background: '#f5f5f5' }}>
+              <button
+                onClick={pickDirectory}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: 8,
+                  border: '1px solid var(--border-primary)',
+                  background: 'var(--bg-tertiary)',
+                  color: 'var(--text-primary)',
+                  cursor: 'pointer',
+                }}
+              >
                 Choose…
               </button>
             </div>
           </div>
           {error && (
-            <div style={{ color: '#b00020', fontSize: 13, marginTop: 8 }}>{error}</div>
+            <div style={{ color: 'var(--danger)', fontSize: 13, marginTop: 8 }}>{error}</div>
           )}
         </div>
-        <div style={{ padding: 16, display: 'flex', justifyContent: 'flex-end', gap: 8, borderTop: '1px solid #eee' }}>
-          <button onClick={onClose} disabled={saving} style={{ padding: '10px 14px', borderRadius: 8, border: '1px solid #ddd', background: '#f5f5f5' }}>Cancel</button>
-          <button onClick={handleSave} disabled={saving} style={{ padding: '10px 14px', borderRadius: 8, border: '1px solid #0b5', background: '#0c6', color: '#fff' }}>{saving ? 'Saving…' : 'Save'}</button>
+        <div style={{
+          padding: 16,
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: 8,
+          borderTop: '1px solid var(--border-primary)',
+        }}>
+          <button
+            onClick={onClose}
+            disabled={saving}
+            style={{
+              padding: '10px 14px',
+              borderRadius: 8,
+              border: '1px solid var(--border-primary)',
+              background: 'var(--bg-tertiary)',
+              color: 'var(--text-primary)',
+              cursor: 'pointer',
+            }}
+          >Cancel</button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            style={{
+              padding: '10px 14px',
+              borderRadius: 8,
+              border: 'none',
+              background: '#16a34a',
+              color: '#fff',
+              cursor: 'pointer',
+              fontWeight: 600,
+            }}
+          >{saving ? 'Saving…' : 'Save'}</button>
         </div>
       </div>
     </div>

@@ -10,10 +10,8 @@ interface ThemeContextType {
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [theme, setTheme] = useState<Theme>(() => {
-    const saved = localStorage.getItem('aud-io-theme');
-    return (saved === 'dark' || saved === 'light') ? saved : 'dark';
-  });
+  // Always default to light theme on every app open
+  const [theme, setTheme] = useState<Theme>('light');
 
   useEffect(() => {
     localStorage.setItem('aud-io-theme', theme);
