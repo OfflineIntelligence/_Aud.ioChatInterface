@@ -35,7 +35,6 @@
         "active": true,
         "targets": "all",
         "icon": [
-            "icons/icon.icns",
             "icons/icon.png",
             "icons/icon.ico"
         ],
@@ -48,22 +47,7 @@
         "macOS": {
             "entitlements": "entitlements.plist",
             "minimumSystemVersion": "10.15",
-            "signingIdentity": null,
-            "infoPlist": {
-                "NSAppTransportSecurity": {
-                    "NSAllowsLocalNetworking": true,
-                    "NSExceptionDomains": {
-                        "localhost": {
-                            "NSExceptionAllowsInsecureHTTPLoads": true,
-                            "NSIncludesSubdomains": false
-                        },
-                        "127.0.0.1": {
-                            "NSExceptionAllowsInsecureHTTPLoads": true,
-                            "NSIncludesSubdomains": false
-                        }
-                    }
-                }
-            }
+            "signingIdentity": null
         }
     }
 }
